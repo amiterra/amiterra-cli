@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Distribution & release outputs
+/out/
+/dist/
+
+# Test cluster ephemeral disks & caches
+/.cache/
+*.log
+
+# macOS
+.DS_Store
