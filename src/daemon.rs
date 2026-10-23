@@ -500,10 +500,6 @@ roles:
       vm.max_map_count: "1600000"
     sysfs:
       kernel/mm/transparent_hugepage/enabled: "never"
-  kafka:
-    weight: 50
-    sysfs:
-      block/*/queue/scheduler: "none"
 "#;
         fs::write(rules_path, demo_rules)?;
     }

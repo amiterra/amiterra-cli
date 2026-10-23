@@ -28,6 +28,9 @@ pub struct ClusterConfig {
     pub api_port: u16,
     #[serde(default = "default_networking_profile")]
     pub networking: String,
+    /// Preferred sandbox engine family: "qemu" | "container" | "host".
+    #[serde(default)]
+    pub sandbox_engine: Option<String>,
 }
 
 fn default_api_port() -> u16 {
@@ -44,6 +47,7 @@ impl Default for ClusterConfig {
             runtime: "docker".to_string(),
             api_port: default_api_port(),
             networking: default_networking_profile(),
+            sandbox_engine: None,
         }
     }
 }
@@ -82,6 +86,8 @@ pub struct ExecutionContext {
     pub config_path: PathBuf,
     pub mcp_config_path: PathBuf,
     pub init_args: Option<crate::cli::InitArgs>,
+    /// Preferred sandbox engine family chosen in the unified init wizard.
+    pub sandbox_engine: Option<String>,
 }
 
 impl ExecutionContext {
@@ -116,6 +122,7 @@ impl ExecutionContext {
             config_path,
             mcp_config_path,
             init_args: None,
+            sandbox_engine: None,
         }
     }
 

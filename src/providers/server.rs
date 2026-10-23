@@ -26,6 +26,25 @@ pub enum K3sInspection {
     },
 }
 
+/// Operator choice when an existing K3s install conflicts with Amiterra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemediationChoice {
+    SafeMigration,
+    CleanReinstall,
+    Abort,
+}
+
+/// Pure parser for the remediation menu. `None` = invalid input (re-prompt).
+/// Empty input = documented default (Safe Migration). Never maps garbage to a destructive path.
+pub fn parse_remediation_choice(raw: &str) -> Option<RemediationChoice> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "1" => Some(RemediationChoice::SafeMigration),
+        "2" => Some(RemediationChoice::CleanReinstall),
+        "3" | "q" | "quit" | "abort" => Some(RemediationChoice::Abort),
+        _ => None,
+    }
+}
+
 /// Evaluates K3s installation configuration string against Amiterra requirements.
 pub fn analyze_k3s_config(
     k3s_binary_exists: bool,
@@ -115,8 +134,8 @@ impl EnvironmentBackend for LinuxServerBackend {
                     return Ok(());
                 }
 
-                // Ensure host invariants and amiterra daemon are running
-                apply_host_invariants()?;
+                // Ensure platform prep and amiterra daemon are running
+                crate::tune::apply_platform_prep()?;
                 install_systemd_unit()?;
 
                 // Ensure K3s service is actively running and ready
@@ -188,38 +207,43 @@ impl EnvironmentBackend for LinuxServerBackend {
                 } else {
                     use std::io::IsTerminal;
                     let remediation = if init_args.yes || !std::io::stdin().is_terminal() {
-                        1 // Default to Safe Migration in non-interactive / yes mode
+                        RemediationChoice::SafeMigration // explicit non-interactive default
                     } else {
                         use std::io::Write;
                         println!("\n  Recommended Remediation Options:");
                         println!("    1. Safe Migration (Recommended) — Back up config and reconfigure to Amiterra eBPF");
                         println!("    2. Clean Reinstall              — Run k3s-uninstall.sh and perform fresh bootstrap");
                         println!("    3. Abort                        — Exit without modifying host");
-                        print!(
-                            "\n  {} Select remediation option [1-3, default 1]: ",
-                            crate::ui::Palette::cyan("?")
-                        );
-                        std::io::stdout().flush()?;
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input)?;
-                        match input.trim() {
-                            "2" => 2,
-                            "3" | "q" | "abort" => 3,
-                            _ => 1,
+                        loop {
+                            print!(
+                                "\n  {} Select remediation option [1-3, Enter=1]: ",
+                                crate::ui::Palette::cyan("?")
+                            );
+                            std::io::stdout().flush()?;
+                            let mut input = String::new();
+                            std::io::stdin().read_line(&mut input)?;
+                            match parse_remediation_choice(input.trim()) {
+                                Some(choice) => break choice,
+                                None => {
+                                    crate::ui::Ui::step_warn(
+                                        "Invalid selection. Enter 1 (Safe Migration), 2 (Clean Reinstall), 3 (Abort), or press Enter for 1.",
+                                    );
+                                }
+                            }
                         }
                     };
 
                     match remediation {
-                        3 => {
+                        RemediationChoice::Abort => {
                             bail!("Installation aborted by user to resolve K3s configuration conflicts.");
                         }
-                        2 => {
+                        RemediationChoice::CleanReinstall => {
                             let s_clean = Ui::spinner("Running K3s uninstaller for clean reset...");
                             let _ = Command::new("/usr/local/bin/k3s-uninstall.sh").status();
                             let _ = fs::remove_dir_all("/etc/rancher/k3s");
                             s_clean.success("Existing K3s cleanly uninstalled");
                         }
-                        _ => {
+                        RemediationChoice::SafeMigration => {
                             Ui::step_info(
                                 "Safe Migration",
                                 "Backing up existing config and aligning to Amiterra headless eBPF profile...",
@@ -284,9 +308,9 @@ impl EnvironmentBackend for LinuxServerBackend {
 
             println!("  {}", crate::ui::Palette::bold("Planned Host Modifications:"));
             println!(
-                "    {} 1. Apply kernel sysctl profile: {}",
+                "    {} 1. Platform prep (opt-out of perf tuning): {}",
                 crate::ui::Palette::cyan("›"),
-                crate::ui::Palette::dim("/etc/sysctl.d/99-amiterra-bootstrap.conf (BBR, Somaxconn, 524k nofile)")
+                crate::ui::Palette::dim("/etc/sysctl.d/98-amiterra-platform.conf (ip_forward only)")
             );
             println!(
                 "    {} 2. Write K3s headless config:   {}",
@@ -311,16 +335,28 @@ impl EnvironmentBackend for LinuxServerBackend {
                 crate::ui::Palette::cyan("›"),
                 crate::ui::Palette::dim("k3s.service · amiterra.service")
             );
+            println!(
+                "    {} 5. Performance tuning:          {}",
+                crate::ui::Palette::cyan("›"),
+                if init_args.tune_apply {
+                    crate::ui::Palette::dim("ami tune apply (from --tune-apply)")
+                } else {
+                    crate::ui::Palette::dim("SKIPPED — later: ami tune apply")
+                }
+            );
             println!();
             Ui::step_done("Dry-run preview complete · Zero system modifications applied.", None);
             println!();
             return Ok(());
         }
 
-        // 4. Host kernel invariants & limits
-        let s1 = Ui::spinner("Applying host kernel invariants (sysctl & limits)...");
-        apply_host_invariants()?;
-        s1.success("Host kernel invariants applied (BBR, Somaxconn, 524k nofile)");
+        // 4. Platform prep only (pod networking). Performance tuning is opt-in via `ami tune`.
+        let s1 = Ui::spinner("Applying platform prep (pod networking sysctl)...");
+        let platform_changes = crate::tune::apply_platform_prep()?;
+        s1.success(&format!(
+            "Platform prep applied ({} networking key(s))",
+            platform_changes.len().max(2)
+        ));
 
         // 5. K3s binary check & headless install
         if !Path::new("/usr/local/bin/k3s").exists() {
@@ -386,6 +422,20 @@ impl EnvironmentBackend for LinuxServerBackend {
         };
         let _ = ctx.save_config(&cfg);
 
+        // Optional performance tuning (explicit opt-in). Default is safe: skip.
+        // Sources: `--tune-apply` flag, or wizard step (ClusterNodeConfig.apply_performance_tuning).
+        let tune_apply = init_args.tune_apply || node_config.apply_performance_tuning;
+        if tune_apply {
+            let s_tune = Ui::spinner("Applying performance profile...");
+            match crate::tune::apply(true, false) {
+                Ok(()) => s_tune.success("Performance profile applied"),
+                Err(e) => {
+                    s_tune.fail(&format!("Performance profile failed: {e:#}"));
+                    Ui::step_warn("Cluster is up; tune later with `sudo ami tune apply`");
+                }
+            }
+        }
+
         if node_config.role == NodeRole::ControlPlaneInit {
             let token = fs::read_to_string("/var/lib/rancher/k3s/server/node-token")
                 .map(|t| t.trim().to_string())
@@ -403,6 +453,7 @@ impl EnvironmentBackend for LinuxServerBackend {
                 ("Cluster State", "● healthy (control plane online)"),
                 ("Kubernetes API", &format!("https://{}:6443 (mTLS secured)", node_config.node_ip)),
                 ("Networking Stack", "Cilium eBPF (Host-Routing)"),
+                ("Performance Profile", if tune_apply { "● applied" } else { "○ skipped (safe default)" }),
                 ("WireGuard Mesh", if node_config.wireguard_enabled { "● Active (Transparent WAN encryption)" } else { "○ Disabled (Private network)" }),
             ];
             Ui::card("Amiterra Production Cluster Initialized", &ready_items);
@@ -415,19 +466,27 @@ impl EnvironmentBackend for LinuxServerBackend {
             println!("  {} Control Plane node (HA):", crate::ui::Palette::cyan("›"));
             println!("    {} {}", crate::ui::Palette::dim("$"), crate::ui::Palette::cyan(&join_cp));
             println!();
-            Ui::next_steps(
-                "Inspect cluster status:",
-                &["$ ami status", "$ kubectl get nodes -o wide", "$ journalctl -u amiterra -f"],
-            );
+
+            let mut steps = vec![
+                "$ ami status".to_string(),
+                "$ kubectl get nodes -o wide".to_string(),
+            ];
+            if !tune_apply {
+                steps.push("$ sudo ami tune apply   # optional performance profile (BBR, limits)".to_string());
+            }
+            let step_refs: Vec<&str> = steps.iter().map(String::as_str).collect();
+            Ui::next_steps("Inspect cluster status:", &step_refs);
         } else {
             Ui::step_done(
                 "Amiterra node joined cluster successfully!",
                 None,
             );
-            Ui::next_steps(
-                "Verify node status:",
-                &["$ ami status", "$ journalctl -u amiterra -f"],
-            );
+            let mut steps = vec!["$ ami status".to_string()];
+            if !tune_apply {
+                steps.push("$ sudo ami tune apply   # optional performance profile".to_string());
+            }
+            let step_refs: Vec<&str> = steps.iter().map(String::as_str).collect();
+            Ui::next_steps("Verify node status:", &step_refs);
         }
 
         Ok(())
@@ -555,22 +614,20 @@ impl EnvironmentBackend for LinuxServerBackend {
             sp.success("K3s agent uninstalled");
         }
 
-        if Path::new("/etc/sysctl.d/99-amiterra-bootstrap.conf").exists() {
-            let _ = fs::remove_file("/etc/sysctl.d/99-amiterra-bootstrap.conf");
-            let _ = Command::new("sysctl").arg("--system").status();
-            Ui::step_done(
-                "Reverted kernel sysctl profile /etc/sysctl.d/99-amiterra-bootstrap.conf",
-                None,
-            );
+        // Restore tuned host state (performance profile + platform prep + legacy).
+        let _ = crate::tune::rollback(true);
+        for path in [
+            crate::tune::LEGACY_SYSCTL_PATH,
+            crate::tune::PLATFORM_SYSCTL_PATH,
+            crate::tune::TUNE_SYSCTL_PATH,
+            crate::tune::TUNE_LIMITS_PATH,
+        ] {
+            if Path::new(path).exists() {
+                let _ = fs::remove_file(path);
+                Ui::step_done(&format!("Removed {path}"), None);
+            }
         }
-
-        if Path::new("/etc/security/limits.d/99-amiterra.conf").exists() {
-            let _ = fs::remove_file("/etc/security/limits.d/99-amiterra.conf");
-            Ui::step_done(
-                "Removed resource limits /etc/security/limits.d/99-amiterra.conf",
-                None,
-            );
-        }
+        let _ = Command::new("sysctl").arg("--system").status();
 
         if _purge {
             let _ = fs::remove_dir_all("/etc/amiterra");
@@ -579,53 +636,6 @@ impl EnvironmentBackend for LinuxServerBackend {
 
         Ok(())
     }
-}
-
-fn apply_host_invariants() -> Result<()> {
-    let sysctl_content = r#"# Amiterra Day-0 Baseline Host Invariants
-net.core.bpf_jit_enable = 1
-net.core.bpf_jit_harden = 2
-kernel.unprivileged_bpf_disabled = 1
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-net.ipv4.conf.all.rp_filter = 0
-net.ipv4.conf.default.rp_filter = 0
-net.ipv4.conf.all.arp_announce = 2
-net.ipv4.conf.all.arp_ignore = 1
-net.ipv4.neigh.default.gc_thresh1 = 4096
-net.ipv4.neigh.default.gc_thresh2 = 8192
-net.ipv4.neigh.default.gc_thresh3 = 16384
-net.core.somaxconn = 32768
-net.core.netdev_max_backlog = 16384
-net.ipv4.tcp_max_syn_backlog = 16384
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-fs.file-max = 2097152
-fs.nr_open = 2097152
-fs.inotify.max_user_instances = 8192
-fs.inotify.max_user_watches = 524288
-vm.swappiness = 0
-vm.panic_on_oom = 0
-kernel.panic = 10
-kernel.panic_on_oops = 1
-"#;
-    let sysctl_path = Path::new("/etc/sysctl.d/99-amiterra-bootstrap.conf");
-    backup_file_if_exists(sysctl_path)?;
-    fs::write(sysctl_path, sysctl_content)?;
-
-    let limits_content = r#"* soft nofile 524288
-* hard nofile 524288
-root soft nofile 524288
-root hard nofile 524288
-"#;
-    let limits_path = Path::new("/etc/security/limits.d/99-amiterra.conf");
-    backup_file_if_exists(limits_path)?;
-    fs::write(limits_path, limits_content)?;
-
-    let _ = Command::new("sysctl").arg("--system").output();
-    let _ = Command::new("ufw").args(["default", "allow", "routed"]).output();
-
-    Ok(())
 }
 
 pub fn render_k3s_config(config: &ClusterNodeConfig) -> String {
@@ -902,6 +912,7 @@ node-ip: 10.0.0.5
             server_url: None,
             cluster_token: Some("secret123".to_string()),
             isolate_control_plane: true,
+            apply_performance_tuning: false,
         };
 
         let yaml = render_k3s_config(&config);
@@ -926,6 +937,7 @@ node-ip: 10.0.0.5
             server_url: Some("https://10.0.1.10:6443".to_string()),
             cluster_token: Some("join-token".to_string()),
             isolate_control_plane: false,
+            apply_performance_tuning: false,
         };
 
         let yaml = render_k3s_config(&config);
@@ -948,5 +960,19 @@ node-ip: 10.0.0.5
         let manifest_no_wg = render_cilium_manifest(false);
         assert!(manifest_no_wg.contains("encryption:\n      enabled: false"));
         assert!(!manifest_no_wg.contains("type: wireguard"));
+    }
+
+    #[test]
+    fn test_parse_remediation_choice_rejects_garbage() {
+        assert_eq!(parse_remediation_choice(""), Some(RemediationChoice::SafeMigration));
+        assert_eq!(parse_remediation_choice("1"), Some(RemediationChoice::SafeMigration));
+        assert_eq!(parse_remediation_choice("2"), Some(RemediationChoice::CleanReinstall));
+        assert_eq!(parse_remediation_choice("3"), Some(RemediationChoice::Abort));
+        assert_eq!(parse_remediation_choice("q"), Some(RemediationChoice::Abort));
+        // Regression: garbage must NOT become SafeMigration (host-modifying default).
+        assert_eq!(parse_remediation_choice("4"), None);
+        assert_eq!(parse_remediation_choice("yes"), None);
+        assert_eq!(parse_remediation_choice("22"), None);
+        assert_eq!(parse_remediation_choice("clean"), None);
     }
 }

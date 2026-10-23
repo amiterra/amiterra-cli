@@ -62,6 +62,52 @@ pub struct ClusterNodeConfig {
     pub server_url: Option<String>,
     pub cluster_token: Option<String>,
     pub isolate_control_plane: bool,
+    /// Opt-in performance profile (`ami tune apply`) after install.
+    #[serde(default)]
+    pub apply_performance_tuning: bool,
+}
+
+/// Outcome of parsing the node-role menu input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RoleChoice {
+    Role(NodeRole),
+    Custom,
+    Quit,
+    /// Unknown input — caller must re-prompt, never silently pick a role.
+    Invalid,
+}
+
+/// Pure parser for `prompt_node_role_and_action` (unit-testable).
+pub fn parse_role_choice(raw: &str) -> RoleChoice {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "1" => RoleChoice::Role(NodeRole::ControlPlaneInit),
+        "2" => RoleChoice::Role(NodeRole::ControlPlane),
+        "3" => RoleChoice::Role(NodeRole::Worker),
+        "c" | "custom" => RoleChoice::Custom,
+        "q" | "quit" | "abort" => RoleChoice::Quit,
+        _ => RoleChoice::Invalid,
+    }
+}
+
+/// Outcome of parsing the performance-tuning menu input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TuningChoice {
+    Skip,
+    Apply,
+    Preview,
+    /// Unknown input — caller must re-prompt.
+    Invalid,
+}
+
+/// Pure parser for `prompt_performance_tuning` (unit-testable).
+/// Empty input = safe default (Skip). Never silently Apply.
+pub fn parse_tuning_choice(raw: &str) -> TuningChoice {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "n" | "no" | "skip" => TuningChoice::Skip,
+        "2" | "y" | "yes" | "apply" => TuningChoice::Apply,
+        "3" | "p" | "plan" | "preview" => TuningChoice::Preview,
+        _ => TuningChoice::Invalid,
+    }
 }
 
 pub struct TerminalWizard;
@@ -70,8 +116,16 @@ impl TerminalWizard {
     /// Runs the Scenario B terminal wizard. If `args.yes` is provided or standard input
     /// is non-interactive, smart defaults are used automatically without waiting for input.
     pub fn run(report: &DiscoveryReport, args: &InitArgs) -> Result<ClusterNodeConfig> {
-        // Resolve role from flags or default
-        let cli_role = args.role.as_deref().and_then(NodeRole::parse);
+        // Explicit --role must be valid; never silently fall back to ControlPlaneInit.
+        let cli_role = match args.role.as_deref() {
+            None => None,
+            Some(raw) => Some(NodeRole::parse(raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid --role '{raw}'. Use control-plane-init | control-plane | worker \
+                     (or init/primary, server/ha/master, agent/compute)."
+                )
+            })?),
+        };
 
         // Render Scenario B Discovery Card (Design Doc 0014 format)
         Self::render_discovery_card(report);
@@ -133,9 +187,15 @@ impl TerminalWizard {
         let mut config = Self::build_default_config(report, role, args, server_url.as_deref());
         config.server_url = server_url;
         config.cluster_token = cluster_token;
+        config.apply_performance_tuning = args.tune_apply;
 
         if customize {
             Self::prompt_customization(report, &mut config)?;
+        }
+
+        // Tuning is a first-class optional step — never implicit.
+        if !args.tune_apply && !args.yes {
+            config.apply_performance_tuning = Self::prompt_performance_tuning()?;
         }
 
         Ok(config)
@@ -198,6 +258,7 @@ impl TerminalWizard {
             server_url: args.server_url.clone(),
             cluster_token: args.token.clone(),
             isolate_control_plane: args.isolate_control_plane,
+            apply_performance_tuning: args.tune_apply,
         }
     }
 
@@ -294,26 +355,91 @@ impl TerminalWizard {
             Palette::dim("—")
         );
         println!();
-        print!(
-            "  {} Press {} to launch with verified defaults, {} to select role, {} to customize, or {} to quit: ",
-            Palette::cyan("?"),
-            Palette::bold("[Enter]"),
-            Palette::bold("[1-3]"),
-            Palette::bold("[c]"),
-            Palette::bold("[q]")
-        );
-        stdout().flush()?;
 
-        let mut input = String::new();
-        stdin().read_line(&mut input)?;
-        let choice = input.trim().to_lowercase();
+        loop {
+            print!(
+                "  {} Press {} to launch with verified defaults, {} to select role, {} to customize, or {} to quit: ",
+                Palette::cyan("?"),
+                Palette::bold("[Enter]"),
+                Palette::bold("[1-3]"),
+                Palette::bold("[c]"),
+                Palette::bold("[q]")
+            );
+            stdout().flush()?;
 
-        match choice.as_str() {
-            "q" | "quit" | "abort" => bail!("Installation aborted by user."),
-            "c" | "custom" => Ok((NodeRole::ControlPlaneInit, true)),
-            "2" => Ok((NodeRole::ControlPlane, false)),
-            "3" => Ok((NodeRole::Worker, false)),
-            _ => Ok((NodeRole::ControlPlaneInit, false)),
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+            let choice = input.trim().to_lowercase();
+
+            match parse_role_choice(&choice) {
+                RoleChoice::Quit => bail!("Installation aborted by user."),
+                RoleChoice::Custom => return Ok((NodeRole::ControlPlaneInit, true)),
+                RoleChoice::Role(role) => return Ok((role, false)),
+                RoleChoice::Invalid => {
+                    Ui::step_warn(&format!(
+                        "Invalid selection '{choice}'. Enter 1-3, c, q, or press Enter for default."
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Optional performance-tuning step. Safe default is **skip**.
+    /// Returns true only when the operator explicitly opts in.
+    fn prompt_performance_tuning() -> Result<bool> {
+        use crate::tune::profile::TUNING_DOCS_URL;
+
+        println!("\n  ── Performance Tuning (optional) ───────────────────────────");
+        // Subsystem warning + source-of-truth docs (same contract as `ami tune apply`).
+        crate::tune::print_tuning_scope_warning();
+        println!("     {} Skip — safe default, no host tuning", Palette::bold("[1]"));
+        println!("     {} Apply performance profile now", Palette::bold("[2]"));
+        println!("     {} Preview only (`ami tune plan`)", Palette::bold("[3]"));
+        println!();
+
+        loop {
+            print!(
+                "  {} Select [1-3, press Enter for 1 (Skip)]: ",
+                Palette::cyan("?")
+            );
+            stdout().flush()?;
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+            let raw = input.trim();
+
+            match parse_tuning_choice(raw) {
+                TuningChoice::Apply => {
+                    Ui::step_done("Performance profile will be applied after install", None);
+                    return Ok(true);
+                }
+                TuningChoice::Preview => {
+                    let changes = crate::tune::plan().unwrap_or_default();
+                    let perf: Vec<_> = changes
+                        .into_iter()
+                        .filter(|c| c.layer == "performance")
+                        .collect();
+                    crate::tune::print_plan(&perf, "performance");
+                    println!(
+                        "  (Parameter sources: {TUNING_DOCS_URL} — re-run `ami tune apply` when ready.)"
+                    );
+                    // Preview is not a terminal answer — ask again (Skip / Apply / Preview).
+                    continue;
+                }
+                TuningChoice::Skip => {
+                    Ui::step_info(
+                        "Tuning",
+                        &format!(
+                            "Skipped — sources & docs: {TUNING_DOCS_URL}. Run `sudo ami tune apply` when needed."
+                        ),
+                    );
+                    return Ok(false);
+                }
+                TuningChoice::Invalid => {
+                    Ui::step_warn(&format!(
+                        "Invalid selection '{raw}'. Enter 1 (Skip), 2 (Apply), 3 (Preview), or press Enter for Skip."
+                    ));
+                }
+            }
         }
     }
 
@@ -344,11 +470,20 @@ impl TerminalWizard {
             stdout().flush()?;
             let mut if_choice = String::new();
             stdin().read_line(&mut if_choice)?;
-            if let Ok(idx) = if_choice.trim().parse::<usize>()
+            let raw = if_choice.trim();
+            if raw.is_empty() {
+                // Explicit keep — fine.
+            } else if let Ok(idx) = raw.parse::<usize>()
                 && (1..=report.interfaces.len()).contains(&idx)
             {
                 config.node_ip = report.interfaces[idx - 1].ip.clone();
                 Ui::step_done(&format!("Selected node-ip: {}", config.node_ip), None);
+            } else {
+                // Do not silently keep the old value on garbage input.
+                Ui::step_warn(&format!(
+                    "Invalid interface selection '{raw}'. Keeping node-ip {}.",
+                    config.node_ip
+                ));
             }
         }
 
@@ -449,5 +584,43 @@ mod tests {
         };
 
         TerminalWizard::render_discovery_card(&report);
+    }
+
+    #[test]
+    fn test_parse_role_choice_accepts_valid_and_rejects_garbage() {
+        assert_eq!(parse_role_choice(""), RoleChoice::Role(NodeRole::ControlPlaneInit));
+        assert_eq!(parse_role_choice("1"), RoleChoice::Role(NodeRole::ControlPlaneInit));
+        assert_eq!(parse_role_choice("2"), RoleChoice::Role(NodeRole::ControlPlane));
+        assert_eq!(parse_role_choice("3"), RoleChoice::Role(NodeRole::Worker));
+        assert_eq!(parse_role_choice("C"), RoleChoice::Custom);
+        assert_eq!(parse_role_choice("q"), RoleChoice::Quit);
+        // Regression: garbage must NOT become ControlPlaneInit.
+        assert_eq!(parse_role_choice("4"), RoleChoice::Invalid);
+        assert_eq!(parse_role_choice("abc"), RoleChoice::Invalid);
+        assert_eq!(parse_role_choice("1x"), RoleChoice::Invalid);
+        assert_eq!(parse_role_choice("-1"), RoleChoice::Invalid);
+    }
+
+    #[test]
+    fn test_parse_tuning_choice_never_silently_applies() {
+        assert_eq!(parse_tuning_choice(""), TuningChoice::Skip);
+        assert_eq!(parse_tuning_choice("1"), TuningChoice::Skip);
+        assert_eq!(parse_tuning_choice("2"), TuningChoice::Apply);
+        assert_eq!(parse_tuning_choice("apply"), TuningChoice::Apply);
+        assert_eq!(parse_tuning_choice("3"), TuningChoice::Preview);
+        // Regression: garbage must NOT become Apply (or silent Skip without feedback path).
+        assert_eq!(parse_tuning_choice("4"), TuningChoice::Invalid);
+        assert_eq!(parse_tuning_choice("maybe"), TuningChoice::Invalid);
+        assert_eq!(parse_tuning_choice("22"), TuningChoice::Invalid);
+    }
+
+    #[test]
+    fn test_node_role_parse_rejects_unknown() {
+        assert!(NodeRole::parse("worker").is_some());
+        assert!(NodeRole::parse("master").is_some());
+        // Must be None so run() can hard-error --role typos (no silent ControlPlaneInit).
+        assert_eq!(NodeRole::parse("foo"), None);
+        assert_eq!(NodeRole::parse("4"), None);
+        assert_eq!(NodeRole::parse(""), None);
     }
 }

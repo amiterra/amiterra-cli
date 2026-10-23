@@ -1,4 +1,4 @@
-mod bootstrap;
+pub mod capabilities;
 mod cli;
 mod context;
 mod daemon;
@@ -8,6 +8,7 @@ mod installer;
 mod mcp;
 mod preflight;
 mod providers;
+pub mod tune;
 pub mod ui;
 pub mod wizard;
 
@@ -88,6 +89,9 @@ async fn async_main() -> anyhow::Result<()> {
                 preflight::print_preflight_report(&report);
             }
         }
+        Some(Commands::Tune(args)) => {
+            tune::cli::handle_tune(args)?;
+        }
         Some(Commands::Mcp(args)) => {
             mcp::run_mcp_server(args).await?;
         }
@@ -97,10 +101,6 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Commands::Daemon(_args)) => {
             tracing::info!("Starting Amiterra Daemon (Day 2)...");
             daemon::run().await?;
-        }
-        Some(Commands::Bootstrap) => {
-            tracing::info!("Starting Amiterra Bootstrapper (Day 0)...");
-            bootstrap::run().await?;
         }
         None => {
             installer::handle_init(InitArgs::default()).await?;

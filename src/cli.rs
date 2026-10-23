@@ -1,5 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 
+use crate::tune::cli::TuneArgs;
+
 #[derive(Parser)]
 #[command(name = "amiterra")]
 #[command(author = "Amiterra Architecture Team")]
@@ -35,6 +37,9 @@ pub enum Commands {
     #[command(visible_alias = "preflight")]
     Doctor(DoctorArgs),
 
+    /// Inspect, apply, or roll back host performance tuning (opt-in, reversible)
+    Tune(TuneArgs),
+
     /// Start the Model Context Protocol (MCP) server for AI assistants
     Mcp(McpArgs),
 
@@ -44,16 +49,12 @@ pub enum Commands {
     /// Run background Kubelet monitoring and eBPF host tuning daemon (Day 2 systemd internal)
     #[command(hide = true)]
     Daemon(DaemonArgs),
-
-    /// Run initial K3s node bootstrapper state machine (Day 0 OS image internal)
-    #[command(hide = true)]
-    Bootstrap,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InitArgs {
     /// Local development workstation mode (rootless, zero host sysctl modifications)
-    #[arg(long)]
+    #[arg(long, visible_alias = "local")]
     pub dev: bool,
 
     /// Production server node mode (requires root, configures K3s, Cilium eBPF, sysctl)
@@ -104,6 +105,10 @@ pub struct InitArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    /// Apply the performance tuning profile after initialization (otherwise opt-in via `ami tune apply`)
+    #[arg(long)]
+    pub tune_apply: bool,
+
     /// Preview planned actions without applying any system modifications
     #[arg(long)]
     pub dry_run: bool,
@@ -137,6 +142,10 @@ pub struct JoinArgs {
     /// Skip interactive prompts and accept default options
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Apply the performance tuning profile after joining
+    #[arg(long)]
+    pub tune_apply: bool,
 
     /// Preview planned actions without applying any system modifications
     #[arg(long)]

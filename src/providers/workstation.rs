@@ -5,10 +5,25 @@ use std::path::Path;
 use crate::context::{AmiterraConfig, EnvironmentMode, ExecutionContext};
 use crate::providers::runtime::{detect_active_runtime, detect_runtime_state};
 use crate::providers::sandbox::{
-    detect_sandbox_engine, print_missing_engine_recommendations, DEFAULT_CLUSTER_NAME,
+    detect_sandbox_engine_preferred, print_missing_engine_recommendations, SandboxEngine,
+    DEFAULT_CLUSTER_NAME,
 };
 use crate::providers::{EnvironmentBackend, EnvironmentStatus, StatusMetric};
-use crate::ui::Ui;
+use crate::ui::{Glyphs, Palette, Ui};
+
+/// Resolve the sandbox engine honoring the family chosen in `ami init`
+/// (stored in config / ExecutionContext). Falls back to auto-detect.
+fn resolve_engine(ctx: &ExecutionContext) -> Option<Box<dyn SandboxEngine>> {
+    let preferred = ctx
+        .sandbox_engine
+        .clone()
+        .or_else(|| {
+            let raw = fs::read_to_string(&ctx.config_path).ok()?;
+            let cfg: AmiterraConfig = serde_yaml::from_str(&raw).ok()?;
+            cfg.cluster.sandbox_engine.clone()
+        });
+    detect_sandbox_engine_preferred(preferred.as_deref())
+}
 
 #[derive(Default)]
 pub struct WorkstationBackend;
@@ -21,7 +36,7 @@ impl EnvironmentBackend for WorkstationBackend {
     fn init(&self, ctx: &ExecutionContext, dry_run: bool) -> Result<()> {
         // Step 1: Fail-Fast Prerequisite Verification
         let runtime_state = detect_runtime_state();
-        let sandbox_engine = detect_sandbox_engine();
+        let sandbox_engine = resolve_engine(ctx);
         let skip_check = std::env::var("AMITERRA_SKIP_RUNTIME_CHECK")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -65,6 +80,7 @@ impl EnvironmentBackend for WorkstationBackend {
             cluster: crate::context::ClusterConfig {
                 runtime: engine_binary.clone(),
                 networking: "k3s-headless (no-traefik, no-servicelb)".to_string(),
+                sandbox_engine: ctx.sandbox_engine.clone(),
                 ..Default::default()
             },
             ..Default::default()
@@ -110,6 +126,42 @@ impl EnvironmentBackend for WorkstationBackend {
         ];
         Ui::card("Environment Initialized", &card_items);
 
+        // Shared fidelity contract with production init (same story, different executor).
+        println!();
+        println!("  {}", Palette::bold("Host capability matrix (sandbox):"));
+        println!(
+            "    {} K3s sandbox cluster          {}",
+            Glyphs::BULLET,
+            Palette::green("applied")
+        );
+        println!(
+            "    {} Zero host pollution          {}",
+            Glyphs::BULLET,
+            Palette::green("enforced (no host sysctl)")
+        );
+        println!(
+            "    {} Platform prep / Cilium host  {}",
+            Glyphs::BULLET,
+            Palette::yellow("skipped in sandbox")
+        );
+        println!(
+            "    {} Performance profile (tune)   {}",
+            Glyphs::BULLET,
+            Palette::yellow("skipped — run on a server")
+        );
+        println!(
+            "    {} NVMe LVM / TopoLVM           {}",
+            Glyphs::BULLET,
+            Palette::yellow("skipped in sandbox")
+        );
+        println!(
+            "     {}",
+            Palette::dim(
+                "Production fidelity: run `ami init` on Ubuntu 22.04/24.04 or Debian 12, or use QEMU sandbox."
+            )
+        );
+        println!();
+
         Ui::next_steps(
             "Next actions:",
             &[
@@ -137,7 +189,7 @@ impl EnvironmentBackend for WorkstationBackend {
 
         Ui::header("Developer Sandbox", "Starting Local Cluster");
 
-        let engine = match detect_sandbox_engine() {
+        let engine = match resolve_engine(ctx) {
             Some(e) => e,
             None => {
                 print_missing_engine_recommendations("ami up");
@@ -174,9 +226,9 @@ impl EnvironmentBackend for WorkstationBackend {
         Ok(())
     }
 
-    fn down(&self, _ctx: &ExecutionContext) -> Result<()> {
+    fn down(&self, ctx: &ExecutionContext) -> Result<()> {
         Ui::header("Developer Sandbox", "Stopping Local Cluster");
-        if let Some(engine) = detect_sandbox_engine() {
+        if let Some(engine) = resolve_engine(ctx) {
             let spinner = Ui::spinner(format!("Stopping sandbox cluster '{}'...", DEFAULT_CLUSTER_NAME));
             engine.stop(DEFAULT_CLUSTER_NAME)?;
             spinner.success(&format!(
@@ -191,7 +243,7 @@ impl EnvironmentBackend for WorkstationBackend {
 
     fn status(&self, ctx: &ExecutionContext) -> Result<EnvironmentStatus> {
         let runtime = detect_active_runtime();
-        let engine = detect_sandbox_engine();
+        let engine = resolve_engine(ctx);
         let cluster_running = engine
             .as_ref()
             .map(|e| e.is_running(DEFAULT_CLUSTER_NAME))
@@ -274,7 +326,7 @@ impl EnvironmentBackend for WorkstationBackend {
     }
 
     fn uninstall(&self, ctx: &ExecutionContext, _purge: bool) -> Result<()> {
-        if let Some(engine) = detect_sandbox_engine()
+        if let Some(engine) = resolve_engine(ctx)
             && engine.is_running(DEFAULT_CLUSTER_NAME) {
                 println!("  • Deleting sandbox cluster '{}'...", DEFAULT_CLUSTER_NAME);
                 let _ = engine.delete(DEFAULT_CLUSTER_NAME);

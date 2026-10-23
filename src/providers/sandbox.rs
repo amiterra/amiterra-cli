@@ -11,8 +11,8 @@ pub const DEFAULT_CLUSTER_NAME: &str = "amiterra-dev";
 const K3S_SANDBOX_IMAGE: &str = "rancher/k3s:v1.31.2-k3s1";
 
 /// Trait for local Kubernetes sandbox orchestrators.
-/// Supports both direct container-based K3s engines (Docker Desktop, Docker Engine, Podman, nerdctl)
-/// and dedicated cluster wrappers (k3d, kind, minikube).
+/// MVP scope: container-based headless K3s (Docker, Podman, nerdctl) and a native
+/// host K3s fallback — no dedicated cluster wrappers (k3d/kind/minikube).
 pub trait SandboxEngine: Send + Sync {
     fn name(&self) -> &'static str;
     fn binary(&self) -> &'static str;
@@ -46,7 +46,7 @@ pub trait SandboxEngine: Send + Sync {
 }
 
 /// Runs a lightweight Headless K3s node directly inside Docker (Docker Desktop, OrbStack, Colima, Rancher Desktop, Linux Docker)
-/// or Podman/nerdctl without requiring k3d or kind to be installed.
+/// or Podman/nerdctl without extra cluster-wrapper tools.
 /// Disables Traefik and ServiceLB to maintain Dev/Prod parity and minimal pod footprint.
 pub struct ContainerK3sEngine {
     pub display_name: &'static str,
@@ -287,183 +287,119 @@ impl SandboxEngine for ContainerK3sEngine {
     }
 }
 
-#[derive(Default)]
-pub struct K3dEngine;
-
-impl SandboxEngine for K3dEngine {
-    fn name(&self) -> &'static str {
-        "k3d"
-    }
-
-    fn binary(&self) -> &'static str {
-        "k3d"
-    }
-
-    fn is_running(&self, cluster_name: &str) -> bool {
-        Command::new("k3d")
-            .args(["cluster", "list", cluster_name])
-            .output()
-            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains(cluster_name))
-            .unwrap_or(false)
-    }
-
-    fn start(
-        &self,
-        cluster_name: &str,
-        api_port: u16,
-        _kubeconfig_path: Option<&Path>,
-    ) -> Result<()> {
-        if self.is_running(cluster_name) {
-            let _ = Command::new("k3d")
-                .args(["cluster", "start", cluster_name])
-                .status()?;
-            return Ok(());
-        }
-
-        let api_mapping = format!("{}:6443@loadbalancer", api_port);
-        let status = Command::new("k3d")
-            .args([
-                "cluster",
-                "create",
-                cluster_name,
-                "-p",
-                &api_mapping,
-                "--k3s-arg",
-                "--disable=traefik@server:*",
-                "--k3s-arg",
-                "--disable=servicelb@server:*",
-            ])
-            .status()?;
-
-        if !status.success() {
-            bail!("k3d failed to create cluster '{}'", cluster_name);
-        }
-        Ok(())
-    }
-
-    fn stop(&self, cluster_name: &str) -> Result<()> {
-        let _ = Command::new("k3d")
-            .args(["cluster", "stop", cluster_name])
-            .status();
-        Ok(())
-    }
-
-    fn delete(&self, cluster_name: &str) -> Result<()> {
-        let _ = Command::new("k3d")
-            .args(["cluster", "delete", cluster_name])
-            .status();
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct KindEngine;
-
-impl SandboxEngine for KindEngine {
-    fn name(&self) -> &'static str {
-        "kind"
-    }
-
-    fn binary(&self) -> &'static str {
-        "kind"
-    }
-
-    fn is_running(&self, cluster_name: &str) -> bool {
-        Command::new("kind")
-            .args(["get", "clusters"])
-            .output()
-            .map(|o| {
-                o.status.success()
-                    && String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .any(|l| l.trim() == cluster_name)
-            })
-            .unwrap_or(false)
-    }
-
-    fn start(
-        &self,
-        cluster_name: &str,
-        _api_port: u16,
-        _kubeconfig_path: Option<&Path>,
-    ) -> Result<()> {
-        if self.is_running(cluster_name) {
-            return Ok(());
-        }
-        let status = Command::new("kind")
-            .args(["create", "cluster", "--name", cluster_name])
-            .status()?;
-        if !status.success() {
-            bail!("kind failed to create cluster '{}'", cluster_name);
-        }
-        Ok(())
-    }
-
-    fn stop(&self, cluster_name: &str) -> Result<()> {
-        self.delete(cluster_name)
-    }
-
-    fn delete(&self, cluster_name: &str) -> Result<()> {
-        let _ = Command::new("kind")
-            .args(["delete", "cluster", "--name", cluster_name])
-            .status();
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct MinikubeEngine;
-
-impl SandboxEngine for MinikubeEngine {
-    fn name(&self) -> &'static str {
-        "minikube"
-    }
-
-    fn binary(&self) -> &'static str {
-        "minikube"
-    }
-
-    fn is_running(&self, cluster_name: &str) -> bool {
-        Command::new("minikube")
-            .args(["status", "-p", cluster_name])
-            .output()
-            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("Running"))
-            .unwrap_or(false)
-    }
-
-    fn start(
-        &self,
-        cluster_name: &str,
-        _api_port: u16,
-        _kubeconfig_path: Option<&Path>,
-    ) -> Result<()> {
-        let status = Command::new("minikube")
-            .args(["start", "-p", cluster_name])
-            .status()?;
-        if !status.success() {
-            bail!("minikube failed to start profile '{}'", cluster_name);
-        }
-        Ok(())
-    }
-
-    fn stop(&self, cluster_name: &str) -> Result<()> {
-        let _ = Command::new("minikube")
-            .args(["stop", "-p", cluster_name])
-            .status();
-        Ok(())
-    }
-
-    fn delete(&self, cluster_name: &str) -> Result<()> {
-        let _ = Command::new("minikube")
-            .args(["delete", "-p", cluster_name])
-            .status();
-        Ok(())
-    }
-}
-
 /// Native Headless K3s installed directly on the Linux host system.
 #[derive(Default)]
 pub struct HostK3sEngine;
+
+/// QEMU micro-VM fidelity sandbox (production-like Ubuntu guest).
+/// Delegates lifecycle to `scripts/sandbox-vm.sh` (CoW + cloud-init).
+pub struct QemuSandboxEngine {
+    pub script_path: std::path::PathBuf,
+}
+
+impl QemuSandboxEngine {
+    /// Resolve sandbox-vm.sh from env, next to the binary, or the repo layout.
+    pub fn discover() -> Option<Self> {
+        if let Ok(p) = std::env::var("AMITERRA_SANDBOX_SCRIPT") {
+            let pb = std::path::PathBuf::from(p);
+            if pb.exists() {
+                return Some(Self { script_path: pb });
+            }
+        }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let candidates = [
+                dir.join("sandbox-vm.sh"),
+                dir.join("../scripts/sandbox-vm.sh"),
+                dir.join("../../scripts/sandbox-vm.sh"),
+                dir.join("scripts/sandbox-vm.sh"),
+            ];
+            for c in candidates {
+                if c.exists() {
+                    return Some(Self {
+                        script_path: c.canonicalize().unwrap_or(c),
+                    });
+                }
+            }
+        }
+        let cwd = std::path::PathBuf::from("scripts/sandbox-vm.sh");
+        if cwd.exists() {
+            return Some(Self { script_path: cwd });
+        }
+        let abs = std::path::PathBuf::from("/usr/lib/amiterra/sandbox-vm.sh");
+        if abs.exists() {
+            return Some(Self { script_path: abs });
+        }
+        None
+    }
+
+    fn run(&self, verb: &str) -> std::io::Result<std::process::Output> {
+        Command::new(&self.script_path).arg(verb).output()
+    }
+}
+
+impl SandboxEngine for QemuSandboxEngine {
+    fn name(&self) -> &'static str {
+        "QEMU micro-VM (production-like Ubuntu)"
+    }
+
+    fn binary(&self) -> &'static str {
+        "qemu-system"
+    }
+
+    fn is_installed(&self) -> bool {
+        self.script_path.exists()
+            && (Command::new("qemu-system-aarch64")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+                || Command::new("qemu-system-x86_64")
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false))
+    }
+
+    fn is_daemon_ready(&self) -> bool {
+        self.is_installed()
+    }
+
+    fn is_running(&self, _cluster_name: &str) -> bool {
+        self.run("status")
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn start(
+        &self,
+        _cluster_name: &str,
+        _api_port: u16,
+        _kubeconfig_path: Option<&Path>,
+    ) -> Result<()> {
+        let out = self.run("up").map_err(|e| {
+            anyhow::anyhow!("Failed to launch sandbox-vm.sh: {e}")
+        })?;
+        if !out.status.success() {
+            bail!(
+                "QEMU sandbox failed to start: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn stop(&self, _cluster_name: &str) -> Result<()> {
+        let _ = self.run("down");
+        Ok(())
+    }
+
+    fn delete(&self, _cluster_name: &str) -> Result<()> {
+        let _ = self.run("down");
+        Ok(())
+    }
+}
 
 impl SandboxEngine for HostK3sEngine {
     fn name(&self) -> &'static str {
@@ -533,26 +469,22 @@ impl SandboxEngine for HostK3sEngine {
     }
 }
 
-/// Returns all supported sandbox engines in preference order.
-/// Notice that `ContainerK3sEngine::docker()` is included out-of-the-box so anyone with
-/// Docker Desktop, OrbStack, Colima, Rancher Desktop, or Docker Engine can run `ami up`
-/// without needing to install k3d or kind!
+/// Returns all supported sandbox engines in preference order for workstation mode.
+/// Fidelity first (QEMU micro-VM), then fast container sandbox, then native host K3s.
 pub fn available_engines() -> Vec<Box<dyn SandboxEngine>> {
-    vec![
-        Box::new(HostK3sEngine),
-        Box::new(K3dEngine),
-        Box::new(ContainerK3sEngine::docker()),
-        Box::new(ContainerK3sEngine::podman()),
-        Box::new(ContainerK3sEngine::nerdctl()),
-        Box::new(KindEngine),
-        Box::new(MinikubeEngine),
-    ]
+    let mut engines: Vec<Box<dyn SandboxEngine>> = Vec::new();
+    if let Some(q) = QemuSandboxEngine::discover() {
+        engines.push(Box::new(q));
+    }
+    engines.push(Box::new(ContainerK3sEngine::docker()));
+    engines.push(Box::new(ContainerK3sEngine::podman()));
+    engines.push(Box::new(ContainerK3sEngine::nerdctl()));
+    engines.push(Box::new(HostK3sEngine));
+    engines
 }
 
-/// Resolves the best available sandbox engine on the host:
-/// 1. Prefers an engine that is both installed AND has a ready daemon.
-/// 2. Falls back to an engine that is installed on disk (even if its daemon needs to be started).
-pub fn detect_sandbox_engine() -> Option<Box<dyn SandboxEngine>> {
+/// Resolve engines, optionally preferring a named family: "qemu" | "container" | "host".
+pub fn detect_sandbox_engine_preferred(preferred: Option<&str>) -> Option<Box<dyn SandboxEngine>> {
     if std::env::var("AMITERRA_SIMULATE_NO_RUNTIME")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -561,38 +493,82 @@ pub fn detect_sandbox_engine() -> Option<Box<dyn SandboxEngine>> {
     }
 
     let engines = available_engines();
+
+    let matches_pref = |e: &dyn SandboxEngine| -> bool {
+        match preferred {
+            Some("qemu") => e.name().contains("QEMU"),
+            Some("container") => {
+                e.name().contains("Docker")
+                    || e.name().contains("Podman")
+                    || e.name().contains("nerdctl")
+            }
+            Some("host") => e.name().contains("Native"),
+            _ => true,
+        }
+    };
+
+    let mut fallback_name: Option<&'static str> = None;
+
+    // 1) Preferred family, installed + ready.
     for engine in &engines {
-        if engine.is_installed() && engine.is_daemon_ready() {
-            // Re-instantiate matching engine
-            return available_engines()
-                .into_iter()
-                .find(|e| e.name() == engine.name());
+        if matches_pref(engine.as_ref()) && engine.is_installed() && engine.is_daemon_ready() {
+            let name = engine.name();
+            return engines.into_iter().find(|e| e.name() == name);
         }
     }
-    engines.into_iter().find(|e| e.is_installed())
+    // 2) Preferred family, installed (daemon may need start).
+    for engine in &engines {
+        if matches_pref(engine.as_ref()) && engine.is_installed() {
+            let name = engine.name();
+            return engines.into_iter().find(|e| e.name() == name);
+        }
+    }
+    // 3) Any ready engine.
+    for engine in &engines {
+        if engine.is_installed() && engine.is_daemon_ready() {
+            let name = engine.name();
+            return engines.into_iter().find(|e| e.name() == name);
+        }
+    }
+    // 4) Any installed engine.
+    for engine in &engines {
+        if engine.is_installed() {
+            fallback_name = Some(engine.name());
+            break;
+        }
+    }
+    if let Some(name) = fallback_name {
+        return engines.into_iter().find(|e| e.name() == name);
+    }
+    None
+}
+
+/// Resolves the best available sandbox engine on the host (no preference).
+pub fn detect_sandbox_engine() -> Option<Box<dyn SandboxEngine>> {
+    detect_sandbox_engine_preferred(None)
 }
 
 /// Prints comprehensive, platform-aware installation recommendations when no container runtime or sandbox engine is present.
 pub fn print_missing_engine_recommendations(next_command: &str) {
     let steps: Vec<String> = if cfg!(target_os = "macos") {
         vec![
-            "› Desktop Container Runtimes (Recommended for macOS):".to_string(),
+            "› Fidelity sandbox (production-like kernel):".to_string(),
+            "  • QEMU micro-VM                : brew install qemu".to_string(),
+            "› Fast container sandbox (60s demo):".to_string(),
             "  • OrbStack (fast & lightweight) : brew install --cask orbstack".to_string(),
             "  • Docker Desktop                : brew install --cask docker".to_string(),
             "  • Rancher Desktop               : brew install --cask rancher".to_string(),
             "  • Podman Desktop                : brew install --cask podman-desktop".to_string(),
-            "› CLI-Only Engines (100% open-source, headless):".to_string(),
+            "› CLI-Only Runtime:".to_string(),
             "  • Colima + Docker CLI           : brew install colima docker && colima start".to_string(),
-            "  • k3d / kind                    : brew install k3d  (or: brew install kind)".to_string(),
         ]
     } else {
         vec![
             "› Container Runtimes (Recommended for Linux):".to_string(),
             "  • Docker Engine                 : curl -fsSL https://get.docker.com | sh".to_string(),
             "  • Podman (rootless, daemonless) : sudo apt-get update && sudo apt-get install -y podman".to_string(),
-            "› Dedicated Sandbox Wrappers:".to_string(),
-            "  • k3d                           : curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash".to_string(),
-            "  • kind                          : https://kind.sigs.k8s.io/".to_string(),
+            "› Fidelity sandbox:".to_string(),
+            "  • QEMU                          : sudo apt-get install -y qemu-system-arm qemu-utils".to_string(),
         ]
     };
 

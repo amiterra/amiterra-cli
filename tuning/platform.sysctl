@@ -1,0 +1,22 @@
+# =============================================================================
+# Amiterra Tuning Pipeline — Platform Prep Profile
+# =============================================================================
+# WARNING: This file is part of the Amiterra tuning pipeline.
+# Public documentation and audits MUST reference these exact sources.
+# Do not edit values without updating docs and running the tune test suite.
+#
+# Layer:      Platform Prep (applied by `ami init` / `ami tune platform`)
+# Scope:      Minimal host sysctls required for Kubernetes pod networking
+# Reversible: yes (`ami tune rollback`, `ami uninstall`)
+# Embedded:   compiled into the ami binary via include_str! (build-time)
+# Source:     tuning/platform.sysctl
+# Docs:       https://github.com/amiterra/amiterra-cli/tree/main/tuning
+# =============================================================================
+#
+# Format: native sysctl drop-in (`key = value`). Comments start with `#`.
+# This exact text is written to /etc/sysctl.d/98-amiterra-platform.conf.
+
+# --- OS subsystem: kernel networking (IPv4/IPv6 forwarding) ----------------
+# Required for pod → pod and pod → external routing on the host.
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1

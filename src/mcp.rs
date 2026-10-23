@@ -32,20 +32,8 @@ async fn mcp_manifest() -> Json<serde_json::Value> {
         "tools": [
             {
                 "name": "get_cluster_status",
-                "description": "Returns current health and state of K3s, eBPF networking, and host tuner daemon",
+                "description": "Returns current health and state of K3s, eBPF networking, and host tuner daemon (read-only)",
                 "inputSchema": { "type": "object", "properties": {} }
-            },
-            {
-                "name": "deploy_blueprint",
-                "description": "Deploys a service from the Amiterra Blueprints catalog (clickhouse, kafka, postgres)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" },
-                        "replicas": { "type": "integer" }
-                    },
-                    "required": ["name"]
-                }
             }
         ]
     }))

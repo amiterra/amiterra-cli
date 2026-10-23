@@ -116,6 +116,120 @@ impl SecurityGuardrails {
                     ))
                 }
             }
+            // --- Performance profile allowlist (static `ami tune` + dynamic roles) ---
+            "net.core.bpf_jit_enable" => match value.trim() {
+                "0" | "1" => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "net.core.bpf_jit_enable must be 0 or 1, got '{}'",
+                    value
+                )),
+            },
+            "net.core.bpf_jit_harden" => match value.trim() {
+                "0" | "1" | "2" => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "net.core.bpf_jit_harden must be 0, 1, or 2, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("net.core.netdev_max_backlog") => match value.trim().parse::<u32>() {
+                Ok(v) if (1024..=1_048_576).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "net.core.netdev_max_backlog must be between 1024 and 1048576, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("net.core.default_qdisc") => {
+                let v = value.trim();
+                if matches!(v, "fq" | "fq_codel" | "pfifo_fast" | "codel" | "cake" | "noqueue") {
+                    GuardrailDecision::Allowed
+                } else {
+                    GuardrailDecision::Rejected(format!(
+                        "net.core.default_qdisc must be fq, fq_codel, pfifo_fast, codel, cake, or noqueue, got '{}'",
+                        value
+                    ))
+                }
+            }
+            k if k.ends_with("tcp_congestion_control") => {
+                let v = value.trim();
+                if matches!(v, "bbr" | "cubic" | "reno" | "htcp" | "westwood" | "vegas") {
+                    GuardrailDecision::Allowed
+                } else {
+                    GuardrailDecision::Rejected(format!(
+                        "tcp_congestion_control must be an approved algorithm, got '{}'",
+                        value
+                    ))
+                }
+            }
+            k if k.ends_with("gc_thresh1") => match value.trim().parse::<u32>() {
+                Ok(v) if (128..=65_536).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "neigh gc_thresh1 must be between 128 and 65536, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("gc_thresh2") => match value.trim().parse::<u32>() {
+                Ok(v) if (256..=131_072).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "neigh gc_thresh2 must be between 256 and 131072, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("gc_thresh3") => match value.trim().parse::<u32>() {
+                Ok(v) if (512..=262_144).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "neigh gc_thresh3 must be between 512 and 262144, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("rp_filter") => match value.trim() {
+                "0" | "1" | "2" => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "rp_filter must be 0, 1, or 2, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("arp_announce") => match value.trim() {
+                "0" | "1" | "2" => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "arp_announce must be 0, 1, or 2, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("arp_ignore") => match value.trim().parse::<u32>() {
+                Ok(v) if v <= 8 => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "arp_ignore must be 0-8, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("fs.file-max") => match value.trim().parse::<u64>() {
+                Ok(v) if (10_000..=10_000_000).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "fs.file-max must be between 10000 and 10000000, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("fs.nr_open") => match value.trim().parse::<u64>() {
+                Ok(v) if (1024..=10_000_000).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "fs.nr_open must be between 1024 and 10000000, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("inotify.max_user_instances") => match value.trim().parse::<u32>() {
+                Ok(v) if (128..=1_048_576).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "inotify.max_user_instances must be between 128 and 1048576, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("inotify.max_user_watches") => match value.trim().parse::<u64>() {
+                Ok(v) if (1024..=10_485_760).contains(&v) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "inotify.max_user_watches must be between 1024 and 10485760, got '{}'",
+                    value
+                )),
+            },
             _ => {
                 // If it's not in the known performance domain allowlist, reject by default (Zero-Trust)
                 GuardrailDecision::Rejected(format!(
@@ -152,6 +266,16 @@ mod tests {
 
         let res3 = SecurityGuardrails::validate_parameter("fs.suid_dumpable", "2");
         assert!(matches!(res3, GuardrailDecision::Rejected(_)));
+    }
+
+    #[test]
+    fn test_blacklist_blocks_ip_forward_dynamic_tuning() {
+        // Platform prep may set this at install time; dynamic path must never.
+        let res = SecurityGuardrails::validate_parameter("net.ipv4.ip_forward", "1");
+        assert!(matches!(res, GuardrailDecision::Rejected(_)));
+        let res2 =
+            SecurityGuardrails::validate_parameter("net.ipv6.conf.all.forwarding", "1");
+        assert!(matches!(res2, GuardrailDecision::Rejected(_)));
     }
 
     #[test]

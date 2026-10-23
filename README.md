@@ -32,7 +32,7 @@ sudo ami join https://<primary-ip>:6443 --token <token> -y
 
 ## 🚀 Key Features
 
-* **Single Static Binary**: Zero external runtime dependencies. Self-contained Day-0 bootstrapper, Day-1 installer, and Day-2 host daemon.
+* **Single Static Binary**: Zero external runtime dependencies. Self-contained Day-1 installer and Day-2 host daemon.
 * **Headless Kubernetes**: Deploys lightweight K3s stripped of legacy overhead (no Traefik, no ServiceLB, no flannel).
 * **Cilium eBPF Host-Routing**: Native eBPF replacing `kube-proxy` for line-rate packet processing, direct host-routing, and optional WireGuard transparent encryption.
 * **Autonomous Kernel Tuner (Day-2 Daemon)**:
@@ -40,7 +40,10 @@ sudo ami join https://<primary-ip>:6443 --token <token> -y
   * **0% CPU in idle mode** — wakes up purely on container scheduling events.
   * Dynamically computes and applies optimal `sysctl`/`sysfs` invariants (e.g. `vm.max_map_count`, `net.core.somaxconn`, `TCP BBR`) based on pod annotations (`amiterra.io/tuning-role`).
   * Automatic rollback to baseline factory settings when workloads terminate or migrate.
-* **AI-Native Model Context Protocol (MCP)**: Built-in stdio MCP server (`ami mcp`) allowing AI assistants (Claude, Gemini, Cursor) to safely inspect and orchestrate infrastructure.
+* **Explicit, reversible host tuning (`ami tune`)**:
+  * Parameter sources live in [`tuning/`](tuning/) (platform / performance / limits) and are embedded at build time.
+  * `ami init` applies only minimal platform prep; performance profile is opt-in (`ami tune apply`) and shows which OS subsystems change plus a docs link.
+* **AI-Native Model Context Protocol (MCP)**: Built-in MCP server (`ami mcp`) allowing AI assistants (Claude, Gemini, Cursor) to safely inspect cluster and host status (read-only).
 
 ---
 
@@ -52,6 +55,7 @@ sudo ami join https://<primary-ip>:6443 --token <token> -y
 | `ami join <url>` | Join an existing cluster as Control-Plane (`--control-plane`) or Worker |
 | `ami status` | Context-aware health and status of active cluster and tuner daemon |
 | `ami doctor` | System diagnostic inspection (Kernel, cgroups v2, eBPF BTF, BBR) |
+| `ami tune` | Inspect / apply / roll back host performance tuning (opt-in) |
 | `ami mcp` | Start Model Context Protocol server for AI coding assistants |
 | `ami uninstall` | Cleanly remove components, revert sysctl kernel profiles, restore host state |
 
@@ -99,6 +103,19 @@ make cluster-ssh NODE=1
 # Stop cluster and cleanly wipe temporary storage
 make cluster-down
 ```
+
+### QEMU fidelity sandbox (single node)
+
+`ami init` can target a production-like Ubuntu micro-VM (real kernel, sysctl, `ami tune`):
+
+```bash
+# Requires qemu (brew install qemu / apt install qemu-system)
+./scripts/sandbox-vm.sh up      # boot single-node CoW VM
+./scripts/sandbox-vm.sh ssh     # login as ubuntu
+./scripts/sandbox-vm.sh down    # stop and wipe ephemeral disk
+```
+
+Container sandbox remains the fastest first-touch path (~60s, zero host pollution).
 
 ---
 
