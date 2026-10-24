@@ -174,7 +174,6 @@ impl EnvironmentBackend for LinuxServerBackend {
                         networking: "cilium-ebpf (kube-proxy replacement)".to_string(),
                         ..Default::default()
                     },
-                    ..Default::default()
                 };
                 let _ = ctx.save_config(&cfg);
 
@@ -384,6 +383,22 @@ impl EnvironmentBackend for LinuxServerBackend {
             s3.success(&format!("Cilium eBPF manifest deployed ({})", enc_str));
         }
 
+        // 7b. Universal storage (Design 0019): data-root + StorageClass (control plane).
+        {
+            let s_st = Ui::spinner("Preparing universal stateful data root...");
+            crate::storage::cli::apply_universal_data_root()?;
+            if node_config.role.is_control_plane() {
+                let manifests = Path::new("/var/lib/rancher/k3s/server/manifests");
+                let _ = fs::create_dir_all(manifests);
+                let sc_path = manifests.join("amiterra-storage-class.yaml");
+                fs::write(
+                    &sc_path,
+                    crate::storage::local_storageclass_yaml(crate::storage::DATA_ROOT),
+                )?;
+            }
+            s_st.success("Data root ready (tier s0 shared-root until dedicated disk)");
+        }
+
         // 8. Systemd services
         let s4 = Ui::spinner("Starting K3s and Amiterra systemd services...");
         let service_name = if node_config.role == NodeRole::Worker {
@@ -408,6 +423,29 @@ impl EnvironmentBackend for LinuxServerBackend {
             s_ready.success("Control-plane node registered and active");
         }
 
+        // 9b. Storage tier card + node labels (best-effort kubectl).
+        {
+            let inv = crate::storage::StorageInventory::probe().unwrap_or_default();
+            let summary = crate::storage::classify(&inv);
+            println!();
+            println!("  {}", crate::ui::Palette::bold("Storage (universal node)"));
+            println!(
+                "    tier={} class={} policy={}",
+                summary.tier.as_str(),
+                summary.storage_class.as_str(),
+                summary.policy_label()
+            );
+            for n in &summary.notes {
+                println!("     {} {}", crate::ui::Palette::yellow("!"), n);
+            }
+            let _ = apply_storage_node_labels(&summary);
+            println!(
+                "     {}",
+                crate::ui::Palette::dim("Details: ami storage plan   |  upgrade: ami storage prepare")
+            );
+            println!();
+        }
+
         let cfg = AmiterraConfig {
             mode: EnvironmentMode::Server,
             cluster: crate::context::ClusterConfig {
@@ -418,7 +456,6 @@ impl EnvironmentBackend for LinuxServerBackend {
                 ),
                 ..Default::default()
             },
-            ..Default::default()
         };
         let _ = ctx.save_config(&cfg);
 
@@ -616,6 +653,7 @@ impl EnvironmentBackend for LinuxServerBackend {
 
         // Restore tuned host state (performance profile + platform prep + legacy).
         let _ = crate::tune::rollback(true);
+        let mut removed_any = false;
         for path in [
             crate::tune::LEGACY_SYSCTL_PATH,
             crate::tune::PLATFORM_SYSCTL_PATH,
@@ -624,10 +662,14 @@ impl EnvironmentBackend for LinuxServerBackend {
         ] {
             if Path::new(path).exists() {
                 let _ = fs::remove_file(path);
+                removed_any = true;
                 Ui::step_done(&format!("Removed {path}"), None);
             }
         }
-        let _ = Command::new("sysctl").arg("--system").status();
+        // Only reload on Linux when drop-ins changed (macOS `sysctl` has no --system).
+        if removed_any {
+            crate::tune::reload_sysctl();
+        }
 
         if _purge {
             let _ = fs::remove_dir_all("/etc/amiterra");
@@ -781,6 +823,32 @@ fn install_k3s_binary(config: &ClusterNodeConfig) -> Result<()> {
         }
         Err(e) => bail!("Failed to execute K3s installation script: {}", e),
     }
+}
+
+/// Best-effort node labeling for placement Advisor (Design 0019).
+fn apply_storage_node_labels(summary: &crate::storage::StoragePlanSummary) -> Result<()> {
+    let hostname = Command::new("hostname")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "localhost".into());
+    for (key, val) in crate::storage::node_labels(
+        &summary.storage_class,
+        &summary.tier,
+        &summary.policy_label(),
+    ) {
+        let arg = format!("{key}={val}");
+        let _ = Command::new("k3s")
+            .args([
+                "kubectl",
+                "label",
+                "node",
+                &hostname,
+                &arg,
+                "--overwrite",
+            ])
+            .output();
+    }
+    Ok(())
 }
 
 fn wait_for_node_readiness(timeout_secs: u64) -> Result<()> {

@@ -43,7 +43,6 @@ sudo ami join https://<primary-ip>:6443 --token <token> -y
 * **Explicit, reversible host tuning (`ami tune`)**:
   * Parameter sources live in [`tuning/`](tuning/) (platform / performance / limits) and are embedded at build time.
   * `ami init` applies only minimal platform prep; performance profile is opt-in (`ami tune apply`) and shows which OS subsystems change plus a docs link.
-* **AI-Native Model Context Protocol (MCP)**: Built-in MCP server (`ami mcp`) allowing AI assistants (Claude, Gemini, Cursor) to safely inspect cluster and host status (read-only).
 
 ---
 
@@ -56,7 +55,6 @@ sudo ami join https://<primary-ip>:6443 --token <token> -y
 | `ami status` | Context-aware health and status of active cluster and tuner daemon |
 | `ami doctor` | System diagnostic inspection (Kernel, cgroups v2, eBPF BTF, BBR) |
 | `ami tune` | Inspect / apply / roll back host performance tuning (opt-in) |
-| `ami mcp` | Start Model Context Protocol server for AI coding assistants |
 | `ami uninstall` | Cleanly remove components, revert sysctl kernel profiles, restore host state |
 
 ---

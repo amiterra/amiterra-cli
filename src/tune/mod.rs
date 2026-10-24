@@ -107,8 +107,20 @@ fn write_sysctl_live(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Apply sysctl drop-ins from disk into the live kernel (`sysctl --system`).
-fn reload_sysctl() {
+/// True when this OS can apply sysctl drop-ins via `sysctl --system` (Linux only).
+pub fn sysctl_reload_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
+/// Reload sysctl drop-ins into the live kernel.
+///
+/// Linux uses `sysctl --system` (procps). macOS/BSD `sysctl` has no `--system`
+/// flag — invoking it there prints `illegal option` and is meaningless.
+pub fn reload_sysctl() {
+    if !sysctl_reload_supported() {
+        return;
+    }
+    // Capture stderr: never leak host tool noise into the user's terminal.
     let _ = Command::new("sysctl").arg("--system").output();
 }
 
@@ -713,5 +725,17 @@ mod tests {
         let json = serde_json::to_string(&st).unwrap();
         assert!(json.contains("platform_applied"));
         assert!(json.contains("performance_applied"));
+    }
+
+    #[test]
+    fn test_sysctl_reload_is_linux_only() {
+        // macOS/BSD `sysctl` rejects `--system`; reload must be a no-op there.
+        if cfg!(target_os = "linux") {
+            assert!(sysctl_reload_supported());
+        } else {
+            assert!(!sysctl_reload_supported());
+            // Must not spawn `sysctl --system` (would print "illegal option -- -").
+            reload_sysctl();
+        }
     }
 }

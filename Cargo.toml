@@ -39,6 +39,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 
 # CLI Parsing
 clap = { version = "4.6", features = ["derive"] }
-
-# REST API Framework
-axum = "0.8"

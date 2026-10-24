@@ -17,8 +17,7 @@ pub struct AmiterraConfig {
     pub mode: EnvironmentMode,
     #[serde(default)]
     pub cluster: ClusterConfig,
-    #[serde(default)]
-    pub mcp: McpConfigSection,
+    // Note: legacy `mcp` section in old config.yaml is ignored (unknown fields).
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,27 +51,11 @@ impl Default for ClusterConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpConfigSection {
-    pub enabled: bool,
-    pub endpoint: String,
-}
-
-impl Default for McpConfigSection {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            endpoint: "http://127.0.0.1:8080".to_string(),
-        }
-    }
-}
-
 impl Default for AmiterraConfig {
     fn default() -> Self {
         Self {
             mode: EnvironmentMode::Workstation,
             cluster: ClusterConfig::default(),
-            mcp: McpConfigSection::default(),
         }
     }
 }
@@ -84,7 +67,6 @@ pub struct ExecutionContext {
     pub home_dir: PathBuf,
     pub bin_dir: PathBuf,
     pub config_path: PathBuf,
-    pub mcp_config_path: PathBuf,
     pub init_args: Option<crate::cli::InitArgs>,
     /// Preferred sandbox engine family chosen in the unified init wizard.
     pub sandbox_engine: Option<String>,
@@ -99,7 +81,6 @@ impl ExecutionContext {
             .map(PathBuf::from)
             .unwrap_or_else(|_| home_dir.join("bin"));
         let config_path = home_dir.join("config.yaml");
-        let mcp_config_path = home_dir.join("mcp.json");
 
         let mode = if force_server {
             EnvironmentMode::Server
@@ -120,7 +101,6 @@ impl ExecutionContext {
             home_dir,
             bin_dir,
             config_path,
-            mcp_config_path,
             init_args: None,
             sandbox_engine: None,
         }

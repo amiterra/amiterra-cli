@@ -83,27 +83,11 @@ impl EnvironmentBackend for WorkstationBackend {
                 sandbox_engine: ctx.sandbox_engine.clone(),
                 ..Default::default()
             },
-            ..Default::default()
         };
         ctx.save_config(&cfg)?;
 
-        let mcp_config = r#"{
-  "mcpServers": {
-    "amiterra": {
-      "command": "amiterra",
-      "args": ["mcp", "--port", "8080"]
-    }
-  }
-}
-"#;
-        fs::write(&ctx.mcp_config_path, mcp_config)?;
-
         Ui::step_done(
             &format!("Configuration saved to {}", ctx.config_path.display()),
-            None,
-        );
-        Ui::step_done(
-            &format!("Model Context Protocol spec saved to {}", ctx.mcp_config_path.display()),
             None,
         );
 
@@ -116,13 +100,11 @@ impl EnvironmentBackend for WorkstationBackend {
         }
 
         let config_str = ctx.config_path.display().to_string();
-        let mcp_str = ctx.mcp_config_path.display().to_string();
         let card_items = [
             ("Host Policy", "Zero Host Pollution (user-space only)"),
             ("Cluster Profile", "Headless K3s (no Traefik · no ServiceLB)"),
             ("Kubernetes API", "https://127.0.0.1:6443 (mTLS secured)"),
             ("Configuration", config_str.as_str()),
-            ("MCP Specification", mcp_str.as_str()),
         ];
         Ui::card("Environment Initialized", &card_items);
 
@@ -167,7 +149,7 @@ impl EnvironmentBackend for WorkstationBackend {
             &[
                 "ami up        Start the local developer cluster",
                 "ami status    Inspect environment health",
-                "ami mcp       Connect AI assistants via Model Context Protocol",
+                "ami storage   Storage tier and plan",
             ],
         );
 
@@ -340,10 +322,6 @@ impl EnvironmentBackend for WorkstationBackend {
         if ctx.config_path.exists() {
             let _ = fs::remove_file(&ctx.config_path);
             println!("  • Removed configuration {}", ctx.config_path.display());
-        }
-        if ctx.mcp_config_path.exists() {
-            let _ = fs::remove_file(&ctx.mcp_config_path);
-            println!("  • Removed MCP specification {}", ctx.mcp_config_path.display());
         }
 
         for bin_name in ["ami", "amiterra"] {

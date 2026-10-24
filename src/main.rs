@@ -5,9 +5,9 @@ mod daemon;
 pub mod discovery;
 pub mod guardrails;
 mod installer;
-mod mcp;
 mod preflight;
 mod providers;
+pub mod storage;
 pub mod tune;
 pub mod ui;
 pub mod wizard;
@@ -82,18 +82,27 @@ async fn async_main() -> anyhow::Result<()> {
             installer::handle_status(args).await?;
         }
         Some(Commands::Doctor(args)) => {
-            let report = preflight::run_preflight(args.server);
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+            if args.storage {
+                storage::cli::handle_storage(storage::cli::StorageArgs {
+                    command: Some(storage::cli::StorageCommand::Plan {
+                        json: args.json,
+                        full: false,
+                    }),
+                })?;
             } else {
-                preflight::print_preflight_report(&report);
+                let report = preflight::run_preflight(args.server);
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    preflight::print_preflight_report(&report);
+                }
             }
         }
         Some(Commands::Tune(args)) => {
             tune::cli::handle_tune(args)?;
         }
-        Some(Commands::Mcp(args)) => {
-            mcp::run_mcp_server(args).await?;
+        Some(Commands::Storage(args)) => {
+            storage::cli::handle_storage(args)?;
         }
         Some(Commands::Uninstall(args)) => {
             installer::handle_uninstall(args).await?;

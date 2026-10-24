@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
+use crate::storage::cli::StorageArgs;
 use crate::tune::cli::TuneArgs;
 
 #[derive(Parser)]
@@ -40,8 +41,8 @@ pub enum Commands {
     /// Inspect, apply, or roll back host performance tuning (opt-in, reversible)
     Tune(TuneArgs),
 
-    /// Start the Model Context Protocol (MCP) server for AI assistants
-    Mcp(McpArgs),
+    /// Storage inventory, tier plan, and opt-in LVM prepare for stateful workloads
+    Storage(StorageArgs),
 
     /// Completely remove Amiterra, stop clusters, and restore host state
     Uninstall(UninstallArgs),
@@ -202,6 +203,10 @@ pub struct DoctorArgs {
     /// Check requirements specifically for a production server node
     #[arg(long)]
     pub server: bool,
+
+    /// Storage inventory / tier / Order-Improve plan (alias of `ami storage plan`)
+    #[arg(long)]
+    pub storage: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -220,15 +225,4 @@ pub struct UninstallArgs {
     /// Purge all data directories and logs
     #[arg(long)]
     pub purge: bool,
-}
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct McpArgs {
-    /// Port for the MCP HTTP server
-    #[arg(short, long, default_value_t = 8080)]
-    pub port: u16,
-
-    /// Bind host address for the MCP server
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
 }
