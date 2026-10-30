@@ -2,8 +2,8 @@
 //!
 //! One init pipeline presents the same environment choices everywhere.
 //! Options that the current host cannot support stay **visible** but
-//! **disabled**, with a short human-readable reason — no silent fork
-//! between `--server` and `--dev` UX.
+//! **disabled**, with a short human-readable reason — one unified picker,
+//! no separate target UX to remember.
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -129,11 +129,19 @@ fn is_supported_server_distro() -> bool {
 
     match id.as_str() {
         "ubuntu" => {
-            let major: u32 = version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let major: u32 = version
+                .split('.')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             major >= 22
         }
         "debian" => {
-            let major: u32 = version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let major: u32 = version
+                .split('.')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             major >= 12
         }
         _ => false,
@@ -191,7 +199,10 @@ pub fn env_choices(caps: &HostCapabilities) -> Vec<EnvChoice> {
             target: InitTarget::SandboxContainer,
             available: caps.can_run_container_sandbox(),
             reason: if caps.can_run_container_sandbox() {
-                format!("Runtime: {}", caps.container_runtime.as_deref().unwrap_or("?"))
+                format!(
+                    "Runtime: {}",
+                    caps.container_runtime.as_deref().unwrap_or("?")
+                )
             } else {
                 "No container runtime (install Docker/OrbStack/Podman)".into()
             },

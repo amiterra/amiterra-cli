@@ -3,7 +3,7 @@ use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -37,11 +37,21 @@ impl Default for KubeletConfig {
     }
 }
 
-fn default_api_endpoint() -> String { "https://127.0.0.1:10250/pods".to_string() }
-fn default_client_cert_path() -> String { "/var/lib/rancher/k3s/agent/client-kubelet.crt".to_string() }
-fn default_client_key_path() -> String { "/var/lib/rancher/k3s/agent/client-kubelet.key".to_string() }
-fn default_pods_dir() -> String { "/var/lib/kubelet/pods".to_string() }
-fn default_annotation_key() -> String { "amiterra.io/tuning-role".to_string() }
+fn default_api_endpoint() -> String {
+    "https://127.0.0.1:10250/pods".to_string()
+}
+fn default_client_cert_path() -> String {
+    "/var/lib/rancher/k3s/agent/client-kubelet.crt".to_string()
+}
+fn default_client_key_path() -> String {
+    "/var/lib/rancher/k3s/agent/client-kubelet.key".to_string()
+}
+fn default_pods_dir() -> String {
+    "/var/lib/kubelet/pods".to_string()
+}
+fn default_annotation_key() -> String {
+    "amiterra.io/tuning-role".to_string()
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 struct RoleConfig {
@@ -56,8 +66,27 @@ struct RoleConfig {
 struct TuningRules {
     #[serde(default)]
     kubelet: KubeletConfig,
+    /// Only pods in these namespaces may request tuning roles via annotations.
+    /// Free-form pod metadata is untrusted input (any tenant can set it).
+    #[serde(default = "default_trusted_namespaces")]
+    trusted_namespaces: Vec<String>,
     #[serde(default)]
     roles: HashMap<String, RoleConfig>,
+}
+
+fn default_trusted_namespaces() -> Vec<String> {
+    vec!["kube-system".to_string(), "amiterra".to_string()]
+}
+
+/// Role names come from pod annotations (untrusted) and are looked up in
+/// root-owned rules — restrict to safe identifier grammar.
+fn is_valid_role_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -71,8 +100,36 @@ enum ParamType {
     Sysfs,
 }
 
+/// Reject traversal and absolute escapes in rule patterns before they are
+/// turned into filesystem paths (rules come from `tuning_rules.yaml`).
+fn pattern_is_safe(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && !pattern.contains("..")
+        && !pattern.contains('\\')
+        && !pattern.starts_with('/')
+        && pattern.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '*' | '/' | '[' | ']' | '?')
+        })
+}
+
+/// Every tunable read/write must stay inside the kernel-tunable trees.
+fn assert_tunable_path(path: &str) -> Result<()> {
+    if path.contains("..") || path.contains('\\') {
+        anyhow::bail!("unsafe tunable path '{path}' (traversal)");
+    }
+    if !(path.starts_with("/proc/sys/") || path.starts_with("/sys/")) {
+        anyhow::bail!("tunable path '{path}' outside /proc/sys and /sys");
+    }
+    Ok(())
+}
+
 fn expand_pattern(param_type: &ParamType, pattern: &str) -> Vec<String> {
     let mut paths = Vec::new();
+
+    if !pattern_is_safe(pattern) {
+        error!("Rejected unsafe tuning pattern '{pattern}'");
+        return paths;
+    }
 
     let glob_pattern = match param_type {
         ParamType::Sysctl => format!("/proc/sys/{}", pattern.replace('.', "/")),
@@ -80,7 +137,9 @@ fn expand_pattern(param_type: &ParamType, pattern: &str) -> Vec<String> {
     };
 
     if !glob_pattern.contains('*') {
-        paths.push(glob_pattern);
+        if assert_tunable_path(&glob_pattern).is_ok() {
+            paths.push(glob_pattern);
+        }
         return paths;
     }
 
@@ -88,7 +147,10 @@ fn expand_pattern(param_type: &ParamType, pattern: &str) -> Vec<String> {
         Ok(entries) => {
             for entry in entries.filter_map(Result::ok) {
                 if entry.is_file() {
-                    paths.push(entry.to_string_lossy().to_string());
+                    let p = entry.to_string_lossy().to_string();
+                    if assert_tunable_path(&p).is_ok() {
+                        paths.push(p);
+                    }
                 }
             }
         }
@@ -99,14 +161,15 @@ fn expand_pattern(param_type: &ParamType, pattern: &str) -> Vec<String> {
 }
 
 fn read_absolute(path: &str) -> Result<String> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read path: {}", path))?;
+    assert_tunable_path(path)?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read path: {}", path))?;
     Ok(content.trim().to_string())
 }
 
 fn write_absolute(path: &str, value: &str) -> Result<()> {
-    fs::write(path, value)
-        .with_context(|| format!("Failed to write '{}' to {}", value, path))?;
+    assert_tunable_path(path)?;
+    fs::write(path, value).with_context(|| format!("Failed to write '{}' to {}", value, path))?;
     Ok(())
 }
 
@@ -116,7 +179,9 @@ fn save_baseline(baseline: &BaselineState, baseline_path: &Path) {
     }
     match serde_yaml::to_string(baseline) {
         Ok(yaml) => {
-            if let Err(e) = fs::write(baseline_path, yaml) {
+            // Atomic replace: a torn baseline would corrupt rollback data.
+            let tmp = baseline_path.with_extension("yaml.tmp");
+            if let Err(e) = fs::write(&tmp, yaml).and_then(|_| fs::rename(&tmp, baseline_path)) {
                 error!("Failed to persist baseline to disk: {}", e);
             }
         }
@@ -141,16 +206,18 @@ fn capture_initial_baseline(rules: &TuningRules, baseline_path: &Path) -> Result
         for pattern in role.sysctl.keys() {
             for path in expand_pattern(&ParamType::Sysctl, pattern) {
                 if !baseline.paths.contains_key(&path)
-                    && let Ok(val) = read_absolute(&path) {
-                        baseline.paths.insert(path, val);
+                    && let Ok(val) = read_absolute(&path)
+                {
+                    baseline.paths.insert(path, val);
                 }
             }
         }
         for pattern in role.sysfs.keys() {
             for path in expand_pattern(&ParamType::Sysfs, pattern) {
                 if !baseline.paths.contains_key(&path)
-                    && let Ok(val) = read_absolute(&path) {
-                        baseline.paths.insert(path, val);
+                    && let Ok(val) = read_absolute(&path)
+                {
+                    baseline.paths.insert(path, val);
                 }
             }
         }
@@ -217,7 +284,10 @@ fn apply_state(
         match read_absolute(path) {
             Ok(current_val) => {
                 if !baseline.paths.contains_key(path) {
-                    info!("Discovered new dynamic path '{}', recording initial value '{}' in baseline", path, current_val);
+                    info!(
+                        "Discovered new dynamic path '{}', recording initial value '{}' in baseline",
+                        path, current_val
+                    );
                     baseline.paths.insert(path.clone(), current_val.clone());
                     baseline_updated = true;
                 }
@@ -252,29 +322,11 @@ struct ResolvedTlsIdentity {
 }
 
 fn resolve_client_credentials(config: &KubeletConfig) -> Option<ResolvedTlsIdentity> {
-    // 1. Control-plane admin certificate (highest privilege, instantaneous 200 OK without RBAC delay)
-    let admin_cert = Path::new("/var/lib/rancher/k3s/server/tls/client-admin.crt");
-    let admin_key = Path::new("/var/lib/rancher/k3s/server/tls/client-admin.key");
-    if admin_cert.exists() && admin_key.exists() {
-        return Some(ResolvedTlsIdentity {
-            cert_path: admin_cert.to_string_lossy().to_string(),
-            key_path: admin_key.to_string_lossy().to_string(),
-            identity_source: "K3s Cluster Admin (client-admin.crt)",
-        });
-    }
+    // Least privilege first: the daemon only reads the local Kubelet /pods
+    // endpoint — the node's kubelet client certificate is sufficient. The
+    // cluster-admin certificate is a last resort, never a preference.
 
-    // 2. Control-plane kubelet client certificate (designated for API server kubelet proxy)
-    let srv_kubelet_cert = Path::new("/var/lib/rancher/k3s/server/tls/client-kubelet.crt");
-    let srv_kubelet_key = Path::new("/var/lib/rancher/k3s/server/tls/client-kubelet.key");
-    if srv_kubelet_cert.exists() && srv_kubelet_key.exists() {
-        return Some(ResolvedTlsIdentity {
-            cert_path: srv_kubelet_cert.to_string_lossy().to_string(),
-            key_path: srv_kubelet_key.to_string_lossy().to_string(),
-            identity_source: "K3s Server Kubelet Client (client-kubelet.crt)",
-        });
-    }
-
-    // 3. Node agent client certificate (standard for worker and control-plane nodes, works with amiterra RBAC)
+    // 1. Node agent client certificate (worker and control-plane nodes)
     let agent_cert = Path::new("/var/lib/rancher/k3s/agent/client-kubelet.crt");
     let agent_key = Path::new("/var/lib/rancher/k3s/agent/client-kubelet.key");
     if agent_cert.exists() && agent_key.exists() {
@@ -285,7 +337,18 @@ fn resolve_client_credentials(config: &KubeletConfig) -> Option<ResolvedTlsIdent
         });
     }
 
-    // 4. Custom configured paths
+    // 2. Control-plane kubelet client certificate (API server kubelet proxy)
+    let srv_kubelet_cert = Path::new("/var/lib/rancher/k3s/server/tls/client-kubelet.crt");
+    let srv_kubelet_key = Path::new("/var/lib/rancher/k3s/server/tls/client-kubelet.key");
+    if srv_kubelet_cert.exists() && srv_kubelet_key.exists() {
+        return Some(ResolvedTlsIdentity {
+            cert_path: srv_kubelet_cert.to_string_lossy().to_string(),
+            key_path: srv_kubelet_key.to_string_lossy().to_string(),
+            identity_source: "K3s Server Kubelet Client (client-kubelet.crt)",
+        });
+    }
+
+    // 3. Custom configured paths
     let cfg_cert = Path::new(&config.client_cert_path);
     let cfg_key = Path::new(&config.client_key_path);
     if cfg_cert.exists() && cfg_key.exists() {
@@ -293,6 +356,19 @@ fn resolve_client_credentials(config: &KubeletConfig) -> Option<ResolvedTlsIdent
             cert_path: config.client_cert_path.clone(),
             key_path: config.client_key_path.clone(),
             identity_source: "Custom Configured Paths",
+        });
+    }
+
+    // 4. Cluster-admin certificate — over-privileged fallback (MITM blast
+    // radius is cluster-wide), used only when no kubelet identity exists.
+    let admin_cert = Path::new("/var/lib/rancher/k3s/server/tls/client-admin.crt");
+    let admin_key = Path::new("/var/lib/rancher/k3s/server/tls/client-admin.key");
+    if admin_cert.exists() && admin_key.exists() {
+        warn!("Using cluster-admin certificate for kubelet API — no kubelet client identity found");
+        return Some(ResolvedTlsIdentity {
+            cert_path: admin_cert.to_string_lossy().to_string(),
+            key_path: admin_key.to_string_lossy().to_string(),
+            identity_source: "K3s Cluster Admin (client-admin.crt)",
         });
     }
 
@@ -317,14 +393,14 @@ pub fn resolve_pods_dir(configured_path: &str) -> String {
     configured_path.to_string()
 }
 
-async fn wait_for_kubelet_readiness(config: &KubeletConfig, timeout_secs: u64) {
+async fn wait_for_kubelet_readiness(rules: &TuningRules, timeout_secs: u64) {
     let start = std::time::Instant::now();
     info!("Waiting for Kubelet API and mTLS certificates readiness...");
     let mut last_warn = std::time::Instant::now();
 
     loop {
-        if let Some(identity) = resolve_client_credentials(config) {
-            match fetch_active_roles(config, &identity).await {
+        if let Some(identity) = resolve_client_credentials(&rules.kubelet) {
+            match fetch_active_roles(rules, &identity).await {
                 Ok(roles) => {
                     info!(
                         "Kubelet API is ready (authenticated via {}). Active roles: {}",
@@ -356,10 +432,32 @@ async fn wait_for_kubelet_readiness(config: &KubeletConfig, timeout_secs: u64) {
     }
 }
 
+/// Load the cluster CA so the kubelet endpoint can be authenticated.
+/// Chain verification against the k3s CA replaces blanket
+/// `danger_accept_invalid_certs`; only hostname matching is skipped
+/// (kubelet serving certs rarely include 127.0.0.1 in SANs).
+fn load_k3s_ca() -> Result<reqwest::Certificate> {
+    const CANDIDATES: [&str; 2] = [
+        "/var/lib/rancher/k3s/server/tls/server-ca.crt",
+        "/var/lib/rancher/k3s/agent/server-ca.crt",
+    ];
+    for p in CANDIDATES {
+        if let Ok(pem) = fs::read_to_string(p) {
+            return reqwest::Certificate::from_pem(pem.as_bytes())
+                .with_context(|| format!("failed to parse cluster CA {p}"));
+        }
+    }
+    anyhow::bail!(
+        "cluster CA not found (looked in /var/lib/rancher/k3s/server|agent/tls/server-ca.crt) — \
+         refusing to talk to the kubelet API unauthenticated"
+    )
+}
+
 async fn fetch_active_roles(
-    config: &KubeletConfig,
+    rules: &TuningRules,
     identity_info: &ResolvedTlsIdentity,
 ) -> Result<Vec<String>> {
+    let config = &rules.kubelet;
     let cert_pem = fs::read_to_string(&identity_info.cert_path)
         .with_context(|| format!("Failed to read certificate: {}", identity_info.cert_path))?;
     let key_pem = fs::read_to_string(&identity_info.key_path)
@@ -369,8 +467,10 @@ async fn fetch_active_roles(
     let identity = reqwest::Identity::from_pem(identity_pem.as_bytes())
         .context("Failed to create Identity from PEM (verify certificate format)")?;
 
+    let ca = load_k3s_ca()?;
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .add_root_certificate(ca)
+        .danger_accept_invalid_hostnames(true)
         .identity(identity)
         .timeout(Duration::from_secs(10))
         .build()?;
@@ -392,16 +492,36 @@ async fn fetch_active_roles(
 
     if let Some(items) = json.get("items").and_then(|i| i.as_array()) {
         for pod in items {
+            // Pod annotations are settable by any workload: only roles from
+            // trusted namespaces may influence host tuning.
+            let ns = pod
+                .get("metadata")
+                .and_then(|m| m.get("namespace"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !rules.trusted_namespaces.iter().any(|t| t == ns) {
+                continue;
+            }
             if let Some(annotations) = pod
                 .get("metadata")
                 .and_then(|m| m.get("annotations"))
                 .and_then(|a| a.as_object())
-                && let Some(role) = annotations.get(&config.annotation_key).and_then(|v| v.as_str())
+                && let Some(role) = annotations
+                    .get(&config.annotation_key)
+                    .and_then(|v| v.as_str())
             {
                 for r in role.split(',') {
                     let r = r.trim();
-                    if !r.is_empty() {
+                    if r.is_empty() {
+                        continue;
+                    }
+                    if is_valid_role_name(r) {
                         active_roles.insert(r.to_string());
+                    } else {
+                        warn!(
+                            "Rejected invalid tuning-role name '{}' from pod in namespace '{}'",
+                            r, ns
+                        );
                     }
                 }
             }
@@ -474,10 +594,13 @@ fn start_pod_watcher(pods_dir: String, tx: mpsc::Sender<()>) {
 
 // --- Main Reconciliation Loop ---
 
-pub async fn run() -> Result<()> {
+pub async fn run(rules_path_override: Option<PathBuf>) -> Result<()> {
     info!("Starting Amiterra Host & Workload Tuner Daemon (Day 2)...");
 
-    let rules_path = Path::new("/etc/amiterra/tuning_rules.yaml");
+    let default_rules = PathBuf::from("/etc/amiterra/tuning_rules.yaml");
+    let rules_path = rules_path_override
+        .as_deref()
+        .unwrap_or(default_rules.as_path());
     let baseline_path = Path::new("/var/lib/amiterra/baseline.yaml");
 
     if !rules_path.exists() {
@@ -505,12 +628,15 @@ roles:
     }
 
     let rules_content = fs::read_to_string(rules_path)?;
-    let rules: TuningRules = serde_yaml::from_str(&rules_content)
-        .context("Failed to parse tuning_rules.yaml")?;
-    info!("Loaded tuning rules for roles: {:?}", rules.roles.keys().collect::<Vec<_>>());
+    let rules: TuningRules =
+        serde_yaml::from_str(&rules_content).context("Failed to parse tuning_rules.yaml")?;
+    info!(
+        "Loaded tuning rules for roles: {:?}",
+        rules.roles.keys().collect::<Vec<_>>()
+    );
 
     // Wait for Kubelet mTLS certificates (Readiness Probe)
-    wait_for_kubelet_readiness(&rules.kubelet, 60).await;
+    wait_for_kubelet_readiness(&rules, 60).await;
 
     let mut baseline = capture_initial_baseline(&rules, baseline_path)?;
 
@@ -538,7 +664,7 @@ roles:
         }
 
         if let Some(identity) = resolve_client_credentials(&rules.kubelet) {
-            match fetch_active_roles(&rules.kubelet, &identity).await {
+            match fetch_active_roles(&rules, &identity).await {
                 Ok(active_roles) => {
                     info!("Active workload roles on node: {:?}", active_roles);
                     let target_state = calculate_target_state(&active_roles, &rules, &baseline);
@@ -554,4 +680,43 @@ roles:
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_traversal_patterns() {
+        assert!(!pattern_is_safe("../../etc/passwd"));
+        assert!(!pattern_is_safe("/etc/shadow"));
+        assert!(!pattern_is_safe("kernel\\mm"));
+        assert!(!pattern_is_safe(""));
+    }
+
+    #[test]
+    fn accepts_kernel_tunable_patterns() {
+        assert!(pattern_is_safe("vm.swappiness"));
+        assert!(pattern_is_safe("net.ipv4.tcp_congestion_control"));
+        assert!(pattern_is_safe("kernel/mm/transparent_hugepage/enabled"));
+        assert!(pattern_is_safe("block/*/queue/scheduler"));
+    }
+
+    #[test]
+    fn tunable_path_must_stay_in_proc_sys_or_sys() {
+        assert!(assert_tunable_path("/proc/sys/vm/swappiness").is_ok());
+        assert!(assert_tunable_path("/sys/kernel/mm/transparent_hugepage/enabled").is_ok());
+        assert!(assert_tunable_path("/sys/../../etc/passwd").is_err());
+        assert!(assert_tunable_path("/etc/passwd").is_err());
+        assert!(assert_tunable_path("/proc/sys/../sysrq-trigger").is_err());
+    }
+
+    #[test]
+    fn role_names_are_strict_identifiers() {
+        assert!(is_valid_role_name("clickhouse"));
+        assert!(is_valid_role_name("db-primary"));
+        assert!(!is_valid_role_name("DB;rm -rf /"));
+        assert!(!is_valid_role_name("--weight=0"));
+        assert!(!is_valid_role_name(""));
+    }
 }

@@ -2,8 +2,8 @@ pub mod network;
 pub mod probe;
 
 pub use network::{
-    classify_topology, find_collision_free_cidrs, generate_tls_sans, get_occupied_subnets,
-    scan_local_interfaces, HostTopology, NetworkInterface,
+    HostTopology, NetworkInterface, classify_topology, find_collision_free_cidrs,
+    generate_tls_sans, get_occupied_subnets, scan_local_interfaces,
 };
 pub use probe::probe_public_ip;
 

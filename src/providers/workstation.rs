@@ -1,12 +1,12 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::Path;
 
 use crate::context::{AmiterraConfig, EnvironmentMode, ExecutionContext};
 use crate::providers::runtime::{detect_active_runtime, detect_runtime_state};
 use crate::providers::sandbox::{
-    detect_sandbox_engine_preferred, print_missing_engine_recommendations, SandboxEngine,
-    DEFAULT_CLUSTER_NAME,
+    DEFAULT_CLUSTER_NAME, SandboxEngine, detect_sandbox_engine_preferred,
+    print_missing_engine_recommendations,
 };
 use crate::providers::{EnvironmentBackend, EnvironmentStatus, StatusMetric};
 use crate::ui::{Glyphs, Palette, Ui};
@@ -14,14 +14,11 @@ use crate::ui::{Glyphs, Palette, Ui};
 /// Resolve the sandbox engine honoring the family chosen in `ami init`
 /// (stored in config / ExecutionContext). Falls back to auto-detect.
 fn resolve_engine(ctx: &ExecutionContext) -> Option<Box<dyn SandboxEngine>> {
-    let preferred = ctx
-        .sandbox_engine
-        .clone()
-        .or_else(|| {
-            let raw = fs::read_to_string(&ctx.config_path).ok()?;
-            let cfg: AmiterraConfig = serde_yaml::from_str(&raw).ok()?;
-            cfg.cluster.sandbox_engine.clone()
-        });
+    let preferred = ctx.sandbox_engine.clone().or_else(|| {
+        let raw = fs::read_to_string(&ctx.config_path).ok()?;
+        let cfg: AmiterraConfig = serde_yaml::from_str(&raw).ok()?;
+        cfg.cluster.sandbox_engine.clone()
+    });
     detect_sandbox_engine_preferred(preferred.as_deref())
 }
 
@@ -45,7 +42,10 @@ impl EnvironmentBackend for WorkstationBackend {
             Some(engine) => {
                 if let Some(rt) = &runtime_state {
                     if rt.daemon_running {
-                        Ui::step_done(&format!("Container runtime: {} (running)", rt.display_name), None);
+                        Ui::step_done(
+                            &format!("Container runtime: {} (running)", rt.display_name),
+                            None,
+                        );
                     } else {
                         Ui::step_warn(&format!(
                             "Container runtime: {} (installed · daemon stopped)",
@@ -69,7 +69,10 @@ impl EnvironmentBackend for WorkstationBackend {
         };
 
         if dry_run {
-            Ui::step_info("Dry-run", "Prerequisite check passed. No configuration files were written.");
+            Ui::step_info(
+                "Dry-run",
+                "Prerequisite check passed. No configuration files were written.",
+            );
             return Ok(());
         }
 
@@ -92,17 +95,21 @@ impl EnvironmentBackend for WorkstationBackend {
         );
 
         if let Some(rt) = &runtime_state
-            && !rt.daemon_running {
-                Ui::step_warn(&format!(
-                    "{} is installed, but daemon is stopped. 'ami up' will launch it, or run: {}",
-                    rt.display_name, rt.start_hint
-                ));
+            && !rt.daemon_running
+        {
+            Ui::step_warn(&format!(
+                "{} is installed, but daemon is stopped. 'ami up' will launch it, or run: {}",
+                rt.display_name, rt.start_hint
+            ));
         }
 
         let config_str = ctx.config_path.display().to_string();
         let card_items = [
             ("Host Policy", "Zero Host Pollution (user-space only)"),
-            ("Cluster Profile", "Headless K3s (no Traefik · no ServiceLB)"),
+            (
+                "Cluster Profile",
+                "Headless K3s (no Traefik · no ServiceLB)",
+            ),
             ("Kubernetes API", "https://127.0.0.1:6443 (mTLS secured)"),
             ("Configuration", config_str.as_str()),
         ];
@@ -164,7 +171,10 @@ impl EnvironmentBackend for WorkstationBackend {
         if dry_run {
             Ui::step_info(
                 "Dry-run",
-                &format!("Would start local Headless K3s sandbox cluster '{}'.", DEFAULT_CLUSTER_NAME),
+                &format!(
+                    "Would start local Headless K3s sandbox cluster '{}'.",
+                    DEFAULT_CLUSTER_NAME
+                ),
             );
             return Ok(());
         }
@@ -175,21 +185,32 @@ impl EnvironmentBackend for WorkstationBackend {
             Some(e) => e,
             None => {
                 print_missing_engine_recommendations("ami up");
-                bail!("Cannot start sandbox: no compatible container runtime or Kubernetes tool found.");
+                bail!(
+                    "Cannot start sandbox: no compatible container runtime or Kubernetes tool found."
+                );
             }
         };
 
         Ui::step_done(&format!("Using sandbox engine: {}", engine.name()), None);
 
         let kubeconfig_path = ctx.home_dir.join("kubeconfig.yaml");
-        let spinner = Ui::spinner(format!("Starting Headless K3s sandbox '{}'...", DEFAULT_CLUSTER_NAME));
+        let spinner = Ui::spinner(format!(
+            "Starting Headless K3s sandbox '{}'...",
+            DEFAULT_CLUSTER_NAME
+        ));
         engine.start(DEFAULT_CLUSTER_NAME, 6443, Some(&kubeconfig_path))?;
-        spinner.success(&format!("Sandbox cluster '{}' online", DEFAULT_CLUSTER_NAME));
+        spinner.success(&format!(
+            "Sandbox cluster '{}' online",
+            DEFAULT_CLUSTER_NAME
+        ));
 
         let kc_str = kubeconfig_path.display().to_string();
         let card_items = [
             ("Sandbox Cluster", "● healthy (amiterra-dev)"),
-            ("Cluster Profile", "Headless K3s (no Traefik · no ServiceLB)"),
+            (
+                "Cluster Profile",
+                "Headless K3s (no Traefik · no ServiceLB)",
+            ),
             ("Kubernetes API", "https://127.0.0.1:6443 (mTLS secured)"),
             ("Kubeconfig", kc_str.as_str()),
         ];
@@ -198,11 +219,7 @@ impl EnvironmentBackend for WorkstationBackend {
         let export_cmd = format!("$ export KUBECONFIG=\"{}\"", kc_str);
         Ui::next_steps(
             "Quick start:",
-            &[
-                &export_cmd,
-                "$ kubectl get pods -A",
-                "$ ami status",
-            ],
+            &[&export_cmd, "$ kubectl get pods -A", "$ ami status"],
         );
 
         Ok(())
@@ -211,7 +228,10 @@ impl EnvironmentBackend for WorkstationBackend {
     fn down(&self, ctx: &ExecutionContext) -> Result<()> {
         Ui::header("Developer Sandbox", "Stopping Local Cluster");
         if let Some(engine) = resolve_engine(ctx) {
-            let spinner = Ui::spinner(format!("Stopping sandbox cluster '{}'...", DEFAULT_CLUSTER_NAME));
+            let spinner = Ui::spinner(format!(
+                "Stopping sandbox cluster '{}'...",
+                DEFAULT_CLUSTER_NAME
+            ));
             engine.stop(DEFAULT_CLUSTER_NAME)?;
             spinner.success(&format!(
                 "Sandbox cluster '{}' stopped. Host resources released.",
@@ -296,7 +316,8 @@ impl EnvironmentBackend for WorkstationBackend {
 
         Ok(EnvironmentStatus {
             mode: "workstation".to_string(),
-            healthy: config_present,
+            // A config file alone is not health: the sandbox must be running.
+            healthy: cluster_running,
             summary: if cluster_running {
                 "Workstation Sandbox Running".to_string()
             } else {
@@ -309,9 +330,10 @@ impl EnvironmentBackend for WorkstationBackend {
 
     fn uninstall(&self, ctx: &ExecutionContext, _purge: bool) -> Result<()> {
         if let Some(engine) = resolve_engine(ctx)
-            && engine.is_running(DEFAULT_CLUSTER_NAME) {
-                println!("  • Deleting sandbox cluster '{}'...", DEFAULT_CLUSTER_NAME);
-                let _ = engine.delete(DEFAULT_CLUSTER_NAME);
+            && engine.is_running(DEFAULT_CLUSTER_NAME)
+        {
+            println!("  • Deleting sandbox cluster '{}'...", DEFAULT_CLUSTER_NAME);
+            let _ = engine.delete(DEFAULT_CLUSTER_NAME);
         }
 
         let kubeconfig_path = ctx.home_dir.join("kubeconfig.yaml");
@@ -346,8 +368,9 @@ impl EnvironmentBackend for WorkstationBackend {
                 for bin_name in ["ami", "amiterra"] {
                     let link_path = Path::new(&dir).join(bin_name);
                     if (link_path.exists() || fs::symlink_metadata(&link_path).is_ok())
-                        && fs::remove_file(&link_path).is_ok() {
-                            println!("  • Removed PATH binary/link {}", link_path.display());
+                        && fs::remove_file(&link_path).is_ok()
+                    {
+                        println!("  • Removed PATH binary/link {}", link_path.display());
                     }
                 }
             }

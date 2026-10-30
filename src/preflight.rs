@@ -26,14 +26,16 @@ pub struct PreflightReport {
     pub ready_for_dev: bool,
 }
 
-pub fn run_preflight(server_mode: bool) -> PreflightReport {
+pub fn run_preflight() -> PreflightReport {
     let process_name = std::fs::read_to_string("/proc/self/comm")
         .ok()
         .map(|s| s.trim().to_string())
         .or_else(|| {
-            std::env::args_os()
-                .next()
-                .and_then(|a| Path::new(&a).file_name().map(|n| n.to_string_lossy().to_string()))
+            std::env::args_os().next().and_then(|a| {
+                Path::new(&a)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
         })
         .unwrap_or_else(|| "amiterra".to_string());
     let os = std::env::consts::OS.to_string();
@@ -75,8 +77,9 @@ pub fn run_preflight(server_mode: bool) -> PreflightReport {
         None
     };
 
-    let is_server = server_mode
-        || !is_workstation
+    // Server posture is detected, not declared: anything that looks like a
+    // server install (k3s, amiterra unit, root on Linux) reports as server.
+    let is_server = !is_workstation
         || k3s_installed
         || Path::new("/etc/systemd/system/amiterra.service").exists()
         || Path::new("/etc/amiterra.conf").exists()
@@ -85,7 +88,9 @@ pub fn run_preflight(server_mode: bool) -> PreflightReport {
     let container_runtime = detect_active_runtime();
     let sandbox_engine = detect_sandbox_engine().map(|e| e.name().to_string());
     let ready_for_dev = sandbox_engine.is_some() && !k3s_active;
-    let ready_for_server = os == "linux" && is_root && cgroups_v2;
+    // Cilium eBPF requires BTF — a kernel without /sys/kernel/btf/vmlinux
+    // cannot run the production stack.
+    let ready_for_server = os == "linux" && is_root && cgroups_v2 && btf_available;
 
     PreflightReport {
         process_name,
@@ -119,8 +124,14 @@ pub fn print_preflight_report(report: &PreflightReport) {
     };
 
     let mut items: Vec<(&str, String)> = vec![
-        ("Process Identity", format!("{} (single binary)", report.process_name)),
-        ("Operating System", format!("{} ({})", pretty_os, report.arch)),
+        (
+            "Process Identity",
+            format!("{} (single binary)", report.process_name),
+        ),
+        (
+            "Operating System",
+            format!("{} ({})", pretty_os, report.arch),
+        ),
         (
             "Privileges",
             (if report.is_root {
@@ -195,7 +206,7 @@ pub fn print_preflight_report(report: &PreflightReport) {
         "Sandbox Engine"
     };
     let ke_display = if report.k3s_installed {
-        let ver = report.k3s_version.as_deref().unwrap_or("v1.31");
+        let ver = report.k3s_version.as_deref().unwrap_or("v1.37");
         if report.k3s_active {
             format!("● active (Headless K3s {})", ver)
         } else {
@@ -227,7 +238,10 @@ pub fn print_preflight_report(report: &PreflightReport) {
             "○ not ready".to_string()
         };
         items.push(("Server Profile", server_status));
-        items.push(("Workstation Profile", "○ not applicable (Server Node)".to_string()));
+        items.push((
+            "Workstation Profile",
+            "○ not applicable (Server Node)".to_string(),
+        ));
     } else {
         let workstation_status = if let Some(rt) = detect_runtime_state() {
             if rt.daemon_running {
@@ -263,7 +277,11 @@ pub fn print_preflight_report(report: &PreflightReport) {
         if report.k3s_active {
             Ui::next_steps(
                 "Cluster status & inspection:",
-                &["$ ami status", "$ kubectl get nodes -o wide", "$ journalctl -u amiterra -f"],
+                &[
+                    "$ ami status",
+                    "$ kubectl get nodes -o wide",
+                    "$ journalctl -u amiterra -f",
+                ],
             );
         } else if report.k3s_installed {
             Ui::step_warn("K3s service is installed but currently inactive.");
@@ -279,14 +297,14 @@ pub fn print_preflight_report(report: &PreflightReport) {
             Ui::next_steps(
                 "Initialize canonical production stack (Headless K3s + Cilium eBPF):",
                 &[
-                    "Bootstrap new cluster : sudo ami init --server",
+                    "Bootstrap new cluster : sudo ami init",
                     "Join existing cluster  : sudo ami join <endpoint> --token <token>",
                 ],
             );
         } else {
             let mut reasons = Vec::new();
             if !report.is_root {
-                reasons.push("Superuser privileges required : run 'sudo ami doctor --server'");
+                reasons.push("Superuser privileges required : run with sudo");
             }
             if !report.cgroups_v2 {
                 reasons.push("cgroups v2 not enabled         : add 'systemd.unified_cgroup_hierarchy=1' to kernel cmdline");
@@ -296,7 +314,7 @@ pub fn print_preflight_report(report: &PreflightReport) {
                 "Server Prerequisites Not Satisfied",
                 "Production server node requires Linux with root privileges and cgroups v2.",
                 &reason_refs,
-                Some("https://docs.amiterra.io/server/prerequisites"),
+                Some("https://github.com/amiterra/amiterra-cli/tree/main/docs"),
             );
         }
     } else {
@@ -370,7 +388,9 @@ fn get_kernel_version() -> Option<String> {
 }
 
 fn check_bbr() -> bool {
-    if let Ok(content) = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_congestion_control") {
+    if let Ok(content) =
+        std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_congestion_control")
+    {
         return content.contains("bbr");
     }
     false
@@ -382,9 +402,7 @@ fn get_k3s_version() -> Option<String> {
         .output()
         .ok()
         .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|s| {
-            s.split_whitespace().nth(2).map(|v| v.to_string())
-        })
+        .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
 }
 
 #[cfg(test)]
@@ -408,7 +426,7 @@ mod tests {
             sandbox_engine: Some("Native Headless K3s (systemd)".to_string()),
             k3s_installed: true,
             k3s_active: true,
-            k3s_version: Some("v1.31.2+k3s1".to_string()),
+            k3s_version: Some("v1.37.1+k3s1".to_string()),
             ready_for_server: true,
             ready_for_dev: false,
         };

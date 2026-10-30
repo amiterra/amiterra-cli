@@ -81,7 +81,7 @@ done
 
 # 4. Phase 1: Initialize Primary Control Plane Node (Node 1)
 log_step "Phase 1" "Initializing Primary Control Plane (ami-node1)..."
-"${VM_SCRIPT}" run 1 "sudo ami init --server --node-ip 192.168.100.10 -y"
+"${VM_SCRIPT}" run 1 "sudo ami init --role control-plane-init --node-ip 192.168.100.10 -y"
 
 log_step "Phase 1 Check" "Waiting for Node 1 Kubernetes API & Node Readiness..."
 for _ in {1..40}; do

@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
+use crate::gitops::cli::GitopsArgs;
 use crate::storage::cli::StorageArgs;
 use crate::tune::cli::TuneArgs;
 
@@ -41,6 +42,18 @@ pub enum Commands {
     /// Inspect, apply, or roll back host performance tuning (opt-in, reversible)
     Tune(TuneArgs),
 
+    /// Bootstrap GitOps (Flux + Git binding), inspect state — opt-in, idempotent
+    Gitops(GitopsArgs),
+
+    /// Print the full node join command (embeds the cluster token — run on the control plane)
+    JoinCommand {
+        /// Which join string to print: worker | control-plane | all (default: all)
+        role: Option<String>,
+        /// Machine-readable JSON report
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Storage inventory, tier plan, and opt-in LVM prepare for stateful workloads
     Storage(StorageArgs),
 
@@ -54,15 +67,8 @@ pub enum Commands {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct InitArgs {
-    /// Local development workstation mode (rootless, zero host sysctl modifications)
-    #[arg(long, visible_alias = "local")]
-    pub dev: bool,
-
-    /// Production server node mode (requires root, configures K3s, Cilium eBPF, sysctl)
-    #[arg(long)]
-    pub server: bool,
-
     /// Node role in cluster: "control-plane-init", "control-plane", or "worker"
+    /// (presence of role/token/server-url implies a production server target)
     #[arg(long)]
     pub role: Option<String>,
 
@@ -103,12 +109,25 @@ pub struct InitArgs {
     pub isolate_control_plane: bool,
 
     /// Skip interactive prompts and accept default options
+    /// (optional feature layers stay off unless flagged explicitly)
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Enable every applicable optional feature (storage, tuning, GitOps) without prompts
+    #[arg(long)]
+    pub all_features: bool,
+
+    /// Prepare a dedicated LVM data disk by name (e.g. nvme2n1) — implies storage feature
+    #[arg(long)]
+    pub storage_disk: Option<String>,
 
     /// Apply the performance tuning profile after initialization (otherwise opt-in via `ami tune apply`)
     #[arg(long)]
     pub tune_apply: bool,
+
+    /// Bootstrap GitOps (Flux + Git binding) after initialization (otherwise opt-in via `ami gitops bootstrap`)
+    #[arg(long)]
+    pub gitops_bootstrap: bool,
 
     /// Preview planned actions without applying any system modifications
     #[arg(long)]
@@ -141,12 +160,25 @@ pub struct JoinArgs {
     pub tls_san: Vec<String>,
 
     /// Skip interactive prompts and accept default options
+    /// (optional feature layers stay off unless flagged explicitly)
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Enable every applicable optional feature (storage, tuning, GitOps) without prompts
+    #[arg(long)]
+    pub all_features: bool,
+
+    /// Prepare a dedicated LVM data disk by name (e.g. nvme2n1) — implies storage feature
+    #[arg(long)]
+    pub storage_disk: Option<String>,
 
     /// Apply the performance tuning profile after joining
     #[arg(long)]
     pub tune_apply: bool,
+
+    /// Bootstrap GitOps (Flux + Git binding) after joining
+    #[arg(long)]
+    pub gitops_bootstrap: bool,
 
     /// Preview planned actions without applying any system modifications
     #[arg(long)]
@@ -155,43 +187,19 @@ pub struct JoinArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
-    /// Force local development workstation mode
-    #[arg(long)]
-    pub dev: bool,
-
-    /// Force production server node mode
-    #[arg(long)]
-    pub server: bool,
-
     /// Preview planned actions without applying any system modifications
     #[arg(long)]
     pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct DownArgs {
-    /// Force local development workstation mode
-    #[arg(long)]
-    pub dev: bool,
-
-    /// Force production server node mode
-    #[arg(long)]
-    pub server: bool,
-}
+pub struct DownArgs {}
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct StatusArgs {
     /// Output status report in machine-readable JSON format
     #[arg(long)]
     pub json: bool,
-
-    /// Inspect status in local development workstation mode
-    #[arg(long)]
-    pub dev: bool,
-
-    /// Inspect status in production server node mode
-    #[arg(long)]
-    pub server: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -199,10 +207,6 @@ pub struct DoctorArgs {
     /// Output diagnostics report in machine-readable JSON format
     #[arg(long)]
     pub json: bool,
-
-    /// Check requirements specifically for a production server node
-    #[arg(long)]
-    pub server: bool,
 
     /// Storage inventory / tier / Order-Improve plan (alias of `ami storage plan`)
     #[arg(long)]

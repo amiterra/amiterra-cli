@@ -161,7 +161,10 @@ pub fn detect_runtime_state() -> Option<DetectedRuntime> {
     }
 
     // 2. Second pass: look for an installed runtime whose daemon is currently stopped (or restricted)
-    if cfg!(target_os = "linux") && (Path::new("/usr/local/bin/k3s").exists() || Path::new("/etc/rancher/k3s/config.yaml").exists()) {
+    if cfg!(target_os = "linux")
+        && (Path::new("/usr/local/bin/k3s").exists()
+            || Path::new("/etc/rancher/k3s/config.yaml").exists())
+    {
         return Some(DetectedRuntime {
             display_name: "K3s containerd".to_string(),
             daemon_running: false,

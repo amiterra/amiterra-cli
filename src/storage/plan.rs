@@ -5,9 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::classify::StoragePlanSummary;
+use super::classify::{StoragePlanSummary, StorageTier};
 use super::inventory::{RaidSet, StorageInventory};
-use super::profile::{build_node_profile, NodeStorageProfile};
+use super::profile::{NodeStorageProfile, build_node_profile};
 use super::{DATA_ROOT, LOCAL_SC_NAME};
 
 /// Stable JSON payload for Placement Advisor / UI.
@@ -21,7 +21,12 @@ pub struct StoragePlanDocument {
     /// Compact facts sufficient for service placement scoring.
     pub node_profile: NodeStorageProfile,
     /// Machine-readable safety constraints (IDs, not prose).
-    pub constraints: Vec<String>,
+    /// names this field `forbidden`.
+    pub forbidden: Vec<String>,
+    /// Hardware to order for better tiers (Order Guide).
+    pub order_guide: Vec<String>,
+    /// Steps to improve this node's tier (Improve Guide).
+    pub improve_guide: Vec<String>,
     /// Full inventory (devices + raid_sets) — only when `full` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inventory: Option<InventoryDto>,
@@ -87,6 +92,34 @@ pub const CONSTRAINTS: &[&str] = &[
     "do-not-create-loop-lvm-on-root-file",
 ];
 
+/// Order Guide: hardware to order, derived from tier facts.
+fn order_guide(summary: &StoragePlanSummary) -> Vec<String> {
+    let mut g = Vec::new();
+    if summary.tier == StorageTier::S0 {
+        g.push("order a dedicated data disk (NVMe preferred, SSD acceptable) for tier s1".into());
+        g.push("order hardware RAID1 or an md-mirror if stateful redundancy is required".into());
+    }
+    g.push("NVMe data disks enable tier s2 (TopoLVM)".into());
+    g
+}
+
+/// Improve Guide: concrete next steps for this node.
+fn improve_guide(summary: &StoragePlanSummary) -> Vec<String> {
+    let mut g = Vec::new();
+    if let Some(first) = summary.free_disk_names.first() {
+        g.push(format!(
+            "run `ami storage prepare --disk {first}` to open the s1 path"
+        ));
+    } else if summary.tier == StorageTier::S0 {
+        g.push("add a data disk, then run `ami storage prepare` to reach s1".into());
+    }
+    if summary.tier == StorageTier::S0 {
+        g.push("stateful workloads on s0 carry backup-required policy".into());
+    }
+    g.push("verify each step with `ami storage status`".into());
+    g
+}
+
 /// Build plan document. `full=true` attaches detailed inventory.
 pub fn build_plan(
     inv: &StorageInventory,
@@ -118,7 +151,9 @@ pub fn build_plan(
         data_root: DATA_ROOT.to_string(),
         local_storage_class: LOCAL_SC_NAME.to_string(),
         node_profile: build_node_profile(inv, summary),
-        constraints: CONSTRAINTS.iter().map(|s| s.to_string()).collect(),
+        forbidden: CONSTRAINTS.iter().map(|s| s.to_string()).collect(),
+        order_guide: order_guide(summary),
+        improve_guide: improve_guide(summary),
         inventory,
     }
 }
@@ -178,16 +213,20 @@ mod tests {
     }
 
     #[test]
-    fn slim_plan_omits_inventory_and_guides() {
+    fn slim_plan_omits_inventory_but_carries_contract_fields() {
         let inv = dual_nvme_raid1();
         let summary = classify(&inv);
         let plan = build_plan(&inv, &summary, false);
         let json = serde_json::to_string_pretty(&plan).unwrap();
         assert!(plan.inventory.is_none());
         assert!(!json.contains("\"inventory\""));
-        assert!(!json.contains("order_guide"));
         assert!(!json.contains("placement_hints"));
         assert!(!json.contains("devices"));
+        // Stable schema carries forbidden + guides.
+        assert!(json.contains("\"forbidden\""));
+        assert!(json.contains("do-not-shrink-system-raid"));
+        assert!(json.contains("\"order_guide\""));
+        assert!(json.contains("\"improve_guide\""));
         assert!(json.contains("node_profile"));
         assert!(json.contains("raid_summary"));
     }

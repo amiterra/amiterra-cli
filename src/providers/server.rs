@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -45,6 +45,43 @@ pub fn parse_remediation_choice(raw: &str) -> Option<RemediationChoice> {
     }
 }
 
+/// True when `item` appears in the k3s `disable:` list (block or inline form).
+/// A plain substring search would also match comments and unrelated keys.
+fn disable_list_contains(content: &str, item: &str) -> bool {
+    let mut in_disable = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("disable:") {
+            in_disable = true;
+            let rest = rest.split('#').next().unwrap_or("").trim();
+            if rest.starts_with('[') {
+                return rest
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split(',')
+                    .any(|x| x.trim() == item);
+            }
+            if rest == item {
+                return true;
+            }
+            continue;
+        }
+        if in_disable {
+            if let Some(v) = t.strip_prefix('-') {
+                if v.split('#').next().unwrap_or("").trim() == item {
+                    return true;
+                }
+            } else if !t.is_empty() {
+                in_disable = false;
+            }
+        }
+    }
+    false
+}
+
 /// Evaluates K3s installation configuration string against Amiterra requirements.
 pub fn analyze_k3s_config(
     k3s_binary_exists: bool,
@@ -56,11 +93,11 @@ pub fn analyze_k3s_config(
     }
 
     let content = config_content.unwrap_or_default();
-    let flannel_none = content.contains("flannel-backend: \"none\"")
-        || content.contains("flannel-backend: none");
+    let flannel_none =
+        content.contains("flannel-backend: \"none\"") || content.contains("flannel-backend: none");
     let kube_proxy_disabled = content.contains("disable-kube-proxy: true")
         || content.contains("disable-kube-proxy: \"true\"");
-    let traefik_disabled = content.contains("traefik");
+    let traefik_disabled = disable_list_contains(content, "traefik");
 
     if flannel_none && kube_proxy_disabled && traefik_disabled {
         K3sInspection::CompliantAmiterraInstance
@@ -108,12 +145,16 @@ impl EnvironmentBackend for LinuxServerBackend {
         );
 
         if !crate::preflight::is_root() && !dry_run {
-            bail!("Superuser privileges are required for production server setup. Run: sudo ami init --server");
+            bail!(
+                "Superuser privileges are required for production server setup. Run: sudo ami init"
+            );
         }
 
-        let report = run_preflight(true);
+        let report = run_preflight();
         if report.is_workstation {
-            Ui::step_warn("Workstation indicators detected: server kernel sysctl may disrupt Wi-Fi or Swap on a laptop.");
+            Ui::step_warn(
+                "Workstation indicators detected: server kernel sysctl may disrupt Wi-Fi or Swap on a laptop.",
+            );
         }
 
         let init_args = ctx.init_args.clone().unwrap_or_default();
@@ -151,11 +192,12 @@ impl EnvironmentBackend for LinuxServerBackend {
                         .unwrap_or(false);
                 if !k3s_active {
                     let s_svc = Ui::spinner("Starting K3s systemd service...");
-                    let service_name = if Path::new("/etc/systemd/system/k3s-agent.service").exists() {
-                        "k3s-agent"
-                    } else {
-                        "k3s"
-                    };
+                    let service_name =
+                        if Path::new("/etc/systemd/system/k3s-agent.service").exists() {
+                            "k3s-agent"
+                        } else {
+                            "k3s"
+                        };
                     let out = Command::new("systemctl")
                         .args(["enable", "--now", service_name])
                         .output()?;
@@ -178,7 +220,10 @@ impl EnvironmentBackend for LinuxServerBackend {
                 let _ = ctx.save_config(&cfg);
 
                 Ui::step_done("Host is aligned with cluster state.", None);
-                Ui::next_steps("Verify status:", &["$ ami status", "$ journalctl -u amiterra -f"]);
+                Ui::next_steps(
+                    "Verify status:",
+                    &["$ ami status", "$ journalctl -u amiterra -f"],
+                );
                 return Ok(());
             }
             K3sInspection::ConflictingInstance {
@@ -192,10 +237,14 @@ impl EnvironmentBackend for LinuxServerBackend {
                     println!("    • Flannel CNI is active (Conflicts with Amiterra Cilium eBPF)");
                 }
                 if *kube_proxy_active {
-                    println!("    • Kube-Proxy is active (Conflicts with Cilium eBPF Host-Routing)");
+                    println!(
+                        "    • Kube-Proxy is active (Conflicts with Cilium eBPF Host-Routing)"
+                    );
                 }
                 if *traefik_active {
-                    println!("    • Traefik ingress is active (Conflicts with Amiterra API Gateway)");
+                    println!(
+                        "    • Traefik ingress is active (Conflicts with Amiterra API Gateway)"
+                    );
                 }
 
                 if dry_run {
@@ -210,9 +259,15 @@ impl EnvironmentBackend for LinuxServerBackend {
                     } else {
                         use std::io::Write;
                         println!("\n  Recommended Remediation Options:");
-                        println!("    1. Safe Migration (Recommended) — Back up config and reconfigure to Amiterra eBPF");
-                        println!("    2. Clean Reinstall              — Run k3s-uninstall.sh and perform fresh bootstrap");
-                        println!("    3. Abort                        — Exit without modifying host");
+                        println!(
+                            "    1. Safe Migration (Recommended) — Back up config and reconfigure to Amiterra eBPF"
+                        );
+                        println!(
+                            "    2. Clean Reinstall              — Run k3s-uninstall.sh and perform fresh bootstrap"
+                        );
+                        println!(
+                            "    3. Abort                        — Exit without modifying host"
+                        );
                         loop {
                             print!(
                                 "\n  {} Select remediation option [1-3, Enter=1]: ",
@@ -234,13 +289,34 @@ impl EnvironmentBackend for LinuxServerBackend {
 
                     match remediation {
                         RemediationChoice::Abort => {
-                            bail!("Installation aborted by user to resolve K3s configuration conflicts.");
+                            bail!(
+                                "Installation aborted by user to resolve K3s configuration conflicts."
+                            );
                         }
                         RemediationChoice::CleanReinstall => {
                             let s_clean = Ui::spinner("Running K3s uninstaller for clean reset...");
-                            let _ = Command::new("/usr/local/bin/k3s-uninstall.sh").status();
+                            let r = crate::cleanup::run_k3s_uninstaller(
+                                "/usr/local/bin/k3s-uninstall.sh",
+                            );
                             let _ = fs::remove_dir_all("/etc/rancher/k3s");
-                            s_clean.success("Existing K3s cleanly uninstalled");
+                            // Same leftovers as `ami uninstall` would leave: the k3s
+                            // script knows nothing about Cilium, and stale datapath
+                            // state makes the next install's CIDR detector drift.
+                            let report = crate::cleanup::cleanup_cilium_datapath();
+                            if report.removed.is_empty() && report.failed.is_empty() {
+                                s_clean.success("Existing K3s cleanly uninstalled");
+                            } else {
+                                s_clean.success(&format!(
+                                    "Existing K3s cleanly uninstalled (+{} Cilium leftover(s))",
+                                    report.removed.len()
+                                ));
+                            }
+                            for f in &report.failed {
+                                Ui::step_warn(&format!("could not remove {f}"));
+                            }
+                            if let Err(e) = r {
+                                Ui::step_warn(&format!("k3s uninstaller reported: {e:#}"));
+                            }
                         }
                         RemediationChoice::SafeMigration => {
                             Ui::step_info(
@@ -303,13 +379,21 @@ impl EnvironmentBackend for LinuxServerBackend {
                 preview_items.push(("Control Plane Server", srv));
             }
 
-            Ui::card("Planned Node Configuration (Dry-Run Preview)", &preview_items);
+            Ui::card(
+                "Planned Node Configuration (Dry-Run Preview)",
+                &preview_items,
+            );
 
-            println!("  {}", crate::ui::Palette::bold("Planned Host Modifications:"));
+            println!(
+                "  {}",
+                crate::ui::Palette::bold("Planned Host Modifications:")
+            );
             println!(
                 "    {} 1. Platform prep (opt-out of perf tuning): {}",
                 crate::ui::Palette::cyan("›"),
-                crate::ui::Palette::dim("/etc/sysctl.d/98-amiterra-platform.conf (ip_forward only)")
+                crate::ui::Palette::dim(
+                    "/etc/sysctl.d/98-amiterra-platform.conf (ip_forward only)"
+                )
             );
             println!(
                 "    {} 2. Write K3s headless config:   {}",
@@ -335,16 +419,43 @@ impl EnvironmentBackend for LinuxServerBackend {
                 crate::ui::Palette::dim("k3s.service · amiterra.service")
             );
             println!(
-                "    {} 5. Performance tuning:          {}",
+                "    {} 5. Storage optimization:        {}",
                 crate::ui::Palette::cyan("›"),
-                if init_args.tune_apply {
-                    crate::ui::Palette::dim("ami tune apply (from --tune-apply)")
+                match &node_config.storage {
+                    crate::features::StoragePlan::Skip => {
+                        crate::ui::Palette::dim("SKIPPED — later: ami storage prepare")
+                    }
+                    crate::features::StoragePlan::Activate => {
+                        crate::ui::Palette::dim("activate dedicated VG")
+                    }
+                    crate::features::StoragePlan::Prepare(d) => {
+                        crate::ui::Palette::dim(&format!("prepare /dev/{d} (LVM)"))
+                    }
+                }
+            );
+            println!(
+                "    {} 6. Performance tuning:          {}",
+                crate::ui::Palette::cyan("›"),
+                if node_config.apply_performance_tuning {
+                    crate::ui::Palette::dim("ami tune apply")
                 } else {
                     crate::ui::Palette::dim("SKIPPED — later: ami tune apply")
                 }
             );
+            println!(
+                "    {} 7. GitOps bootstrap:            {}",
+                crate::ui::Palette::cyan("›"),
+                if node_config.gitops_bootstrap {
+                    crate::ui::Palette::dim("ami gitops bootstrap")
+                } else {
+                    crate::ui::Palette::dim("SKIPPED — later: ami gitops bootstrap")
+                }
+            );
             println!();
-            Ui::step_done("Dry-run preview complete · Zero system modifications applied.", None);
+            Ui::step_done(
+                "Dry-run preview complete · Zero system modifications applied.",
+                None,
+            );
             println!();
             return Ok(());
         }
@@ -359,7 +470,7 @@ impl EnvironmentBackend for LinuxServerBackend {
 
         // 5. K3s binary check & headless install
         if !Path::new("/usr/local/bin/k3s").exists() {
-            let s_k3s = Ui::spinner("Installing K3s binary (channel v1.31, headless)...");
+            let s_k3s = Ui::spinner("Installing K3s binary (v1.37.1+k3s1, headless)...");
             install_k3s_binary(&node_config)?;
             s_k3s.success("K3s binary installed");
         }
@@ -383,7 +494,34 @@ impl EnvironmentBackend for LinuxServerBackend {
             s3.success(&format!("Cilium eBPF manifest deployed ({})", enc_str));
         }
 
-        // 7b. Universal storage (Design 0019): data-root + StorageClass (control plane).
+        // 7a. Storage feature (opt-in): dedicated LVM data disk. Runs BEFORE the
+        // data root so stateful directories land on the dedicated volume and the
+        // tier is classified correctly in this very run.
+        match &node_config.storage {
+            crate::features::StoragePlan::Skip => {}
+            crate::features::StoragePlan::Activate | crate::features::StoragePlan::Prepare(_) => {
+                let s_st = Ui::spinner("Preparing dedicated data disk...");
+                if let crate::features::StoragePlan::Prepare(disk) = &node_config.storage {
+                    let inv = crate::storage::StorageInventory::probe().unwrap_or_default();
+                    let plan = crate::storage::prepare::plan_prepare(
+                        &inv,
+                        disk,
+                        crate::storage::prepare::DEFAULT_VG,
+                    )?;
+                    crate::storage::prepare::execute_prepare(&plan, false, true)?;
+                }
+                let done = crate::storage::prepare::activate_data_root(
+                    crate::storage::prepare::DEFAULT_VG,
+                    false,
+                )?;
+                s_st.success(&format!(
+                    "Dedicated data disk active ({} step(s))",
+                    done.len().max(1)
+                ));
+            }
+        }
+
+        // 7b. Universal storage: data-root + StorageClass (control plane).
         {
             let s_st = Ui::spinner("Preparing universal stateful data root...");
             crate::storage::cli::apply_universal_data_root()?;
@@ -411,7 +549,11 @@ impl EnvironmentBackend for LinuxServerBackend {
             .output()?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            bail!("Failed to start systemd service '{}': {}", service_name, err.trim());
+            bail!(
+                "Failed to start systemd service '{}': {}",
+                service_name,
+                err.trim()
+            );
         }
         install_systemd_unit()?;
         s4.success("Systemd services enabled and running");
@@ -424,7 +566,7 @@ impl EnvironmentBackend for LinuxServerBackend {
         }
 
         // 9b. Storage tier card + node labels (best-effort kubectl).
-        {
+        let storage_summary = {
             let inv = crate::storage::StorageInventory::probe().unwrap_or_default();
             let summary = crate::storage::classify(&inv);
             println!();
@@ -439,12 +581,22 @@ impl EnvironmentBackend for LinuxServerBackend {
                 println!("     {} {}", crate::ui::Palette::yellow("!"), n);
             }
             let _ = apply_storage_node_labels(&summary);
-            println!(
-                "     {}",
-                crate::ui::Palette::dim("Details: ami storage plan   |  upgrade: ami storage prepare")
-            );
-            println!();
-        }
+            // The upgrade hint is a dead end when nothing can be prepared.
+            if summary.free_disk_names.is_empty() {
+                println!(
+                    "     {}",
+                    crate::ui::Palette::dim("Details: ami storage plan")
+                );
+            } else {
+                println!(
+                    "     {}",
+                    crate::ui::Palette::dim(
+                        "Details: ami storage plan   |  upgrade: ami storage prepare"
+                    )
+                );
+            }
+            summary
+        };
 
         let cfg = AmiterraConfig {
             mode: EnvironmentMode::Server,
@@ -459,49 +611,130 @@ impl EnvironmentBackend for LinuxServerBackend {
         };
         let _ = ctx.save_config(&cfg);
 
-        // Optional performance tuning (explicit opt-in). Default is safe: skip.
-        // Sources: `--tune-apply` flag, or wizard step (ClusterNodeConfig.apply_performance_tuning).
-        let tune_apply = init_args.tune_apply || node_config.apply_performance_tuning;
+        // Optional performance tuning. The wizard's feature plan is the single
+        // source of truth (flags / --all-features / prompts already resolved).
+        let tune_apply = node_config.apply_performance_tuning;
         if tune_apply {
-            let s_tune = Ui::spinner("Applying performance profile...");
-            match crate::tune::apply(true, false) {
-                Ok(()) => s_tune.success("Performance profile applied"),
+            // `tune::apply` owns its UI (header/plan/report) — no outer spinner
+            // and no repeated success line; the inner report is the step output.
+            if let Err(e) = crate::tune::apply(true, false) {
+                Ui::step_warn(&format!("Performance profile failed: {e:#}"));
+                Ui::step_warn("Cluster is up; tune later with `sudo ami tune apply`");
+            }
+        }
+
+        // Optional GitOps bootstrap. The feature plan is authoritative; the C1
+        // role gate stays as defense in depth (cluster-init only).
+        let gitops_bootstrap =
+            node_config.gitops_bootstrap && node_config.role == NodeRole::ControlPlaneInit;
+        if node_config.gitops_bootstrap && node_config.role != NodeRole::ControlPlaneInit {
+            Ui::step_warn(
+                "GitOps bootstrap skipped: only the control-plane-init node may bind \
+                 the cluster Git repository",
+            );
+        }
+        // Some(true) = converged, Some(false) = attempted but failed, None = not requested.
+        let mut gitops_outcome: Option<bool> = None;
+        if gitops_bootstrap {
+            let opts = crate::gitops::BootstrapOptions {
+                node_ip: node_config.node_ip.clone(),
+                yes: true,
+                wait_ready: true,
+                ..Default::default()
+            };
+            match crate::gitops::bootstrap(&opts) {
+                Ok(_) => {
+                    Ui::step_done("GitOps bootstrapped (Flux bound to Git)", None);
+                    gitops_outcome = Some(true);
+                }
                 Err(e) => {
-                    s_tune.fail(&format!("Performance profile failed: {e:#}"));
-                    Ui::step_warn("Cluster is up; tune later with `sudo ami tune apply`");
+                    Ui::step_warn(&format!("GitOps bootstrap failed: {e:#}"));
+                    Ui::step_warn(
+                        "Cluster is up; bootstrap later with `sudo ami gitops bootstrap`",
+                    );
+                    gitops_outcome = Some(false);
                 }
             }
         }
 
         if node_config.role == NodeRole::ControlPlaneInit {
-            let token = fs::read_to_string("/var/lib/rancher/k3s/server/node-token")
-                .map(|t| t.trim().to_string())
-                .unwrap_or_else(|_| "<token>".to_string());
-            let join_worker = format!(
-                "sudo ami join https://{}:6443 --token {}",
-                node_config.node_ip, token
-            );
-            let join_cp = format!(
-                "sudo ami join https://{}:6443 --token {} --control-plane",
-                node_config.node_ip, token
-            );
-
             let ready_items = [
                 ("Cluster State", "● healthy (control plane online)"),
-                ("Kubernetes API", &format!("https://{}:6443 (mTLS secured)", node_config.node_ip)),
+                (
+                    "Kubernetes API",
+                    &format!("https://{}:6443 (mTLS secured)", node_config.node_ip),
+                ),
                 ("Networking Stack", "Cilium eBPF (Host-Routing)"),
-                ("Performance Profile", if tune_apply { "● applied" } else { "○ skipped (safe default)" }),
-                ("WireGuard Mesh", if node_config.wireguard_enabled { "● Active (Transparent WAN encryption)" } else { "○ Disabled (Private network)" }),
+                (
+                    "Performance Profile",
+                    if tune_apply {
+                        "● applied"
+                    } else {
+                        "○ skipped (safe default)"
+                    },
+                ),
+                (
+                    "GitOps (Flux)",
+                    match gitops_outcome {
+                        Some(true) => "● bootstrapped",
+                        Some(false) => "○ failed (retry: sudo ami gitops bootstrap)",
+                        None => "○ skipped (safe default)",
+                    },
+                ),
+                (
+                    "Storage",
+                    &format!(
+                        "{} {} · policy {}",
+                        storage_summary.tier.as_str(),
+                        storage_summary.storage_class.as_str(),
+                        storage_summary.policy_label()
+                    ),
+                ),
+                (
+                    "WireGuard Mesh",
+                    if node_config.wireguard_enabled {
+                        "● Active (Transparent WAN encryption)"
+                    } else {
+                        "○ Disabled (Private network)"
+                    },
+                ),
             ];
             Ui::card("Amiterra Production Cluster Initialized", &ready_items);
 
-            println!("  {}", crate::ui::Palette::bold("To join additional nodes to this cluster, run on other servers:"));
+            // The join token is a secret (C2): never print it here. Show the
+            // lookup commands instead — highlighted, copy-paste ready.
+            println!(
+                "  {}",
+                crate::ui::Palette::bold(
+                    "To join additional nodes to this cluster, get the join command here:"
+                )
+            );
             println!();
             println!("  {} Worker node:", crate::ui::Palette::cyan("›"));
-            println!("    {} {}", crate::ui::Palette::dim("$"), crate::ui::Palette::cyan(&join_worker));
+            println!(
+                "    {} {}",
+                crate::ui::Palette::dim("$"),
+                crate::ui::Palette::bold_blue("ami join-command worker")
+            );
             println!();
-            println!("  {} Control Plane node (HA):", crate::ui::Palette::cyan("›"));
-            println!("    {} {}", crate::ui::Palette::dim("$"), crate::ui::Palette::cyan(&join_cp));
+            println!(
+                "  {} Control Plane node (HA):",
+                crate::ui::Palette::cyan("›")
+            );
+            println!(
+                "    {} {}",
+                crate::ui::Palette::dim("$"),
+                crate::ui::Palette::bold_blue("ami join-command control-plane")
+            );
+            println!();
+            println!(
+                "  {} Each command prints the full join string (embeds the cluster token).",
+                crate::ui::Palette::dim("→")
+            );
+            println!(
+                "  {} Run it on this node, then execute the printed line on the joining node.",
+                crate::ui::Palette::dim("→")
+            );
             println!();
 
             let mut steps = vec![
@@ -509,16 +742,28 @@ impl EnvironmentBackend for LinuxServerBackend {
                 "$ kubectl get nodes -o wide".to_string(),
             ];
             if !tune_apply {
-                steps.push("$ sudo ami tune apply   # optional performance profile (BBR, limits)".to_string());
+                steps.push(
+                    "$ sudo ami tune apply   # optional performance profile (BBR, limits)"
+                        .to_string(),
+                );
+            }
+            if gitops_outcome != Some(true) {
+                steps.push(
+                    "$ sudo ami gitops bootstrap   # optional GitOps (Flux + Git binding)"
+                        .to_string(),
+                );
             }
             let step_refs: Vec<&str> = steps.iter().map(String::as_str).collect();
             Ui::next_steps("Inspect cluster status:", &step_refs);
         } else {
-            Ui::step_done(
-                "Amiterra node joined cluster successfully!",
-                None,
-            );
-            let mut steps = vec!["$ ami status".to_string()];
+            // Agent service is running (verified in the systemd step), but
+            // cluster registration is only visible from the control plane.
+            println!();
+            Ui::step_done("Node join complete (k3s service running)", None);
+            let mut steps = vec![
+                "$ ami status".to_string(),
+                "$ kubectl get nodes   # on the control plane — confirm node is Ready".to_string(),
+            ];
             if !tune_apply {
                 steps.push("$ sudo ami tune apply   # optional performance profile".to_string());
             }
@@ -534,12 +779,29 @@ impl EnvironmentBackend for LinuxServerBackend {
             return self.init(ctx, dry_run);
         }
         if dry_run {
-            Ui::step_info("Dry-run preview", "Would start k3s.service and amiterra.service");
+            Ui::step_info(
+                "Dry-run preview",
+                "Would start k3s.service and amiterra.service",
+            );
             return Ok(());
         }
         let sp = Ui::spinner("Starting Amiterra Production Server services...");
-        let _ = Command::new("systemctl").args(["start", "k3s"]).status();
-        let _ = Command::new("systemctl").args(["start", "amiterra"]).status();
+        let mut failed = Vec::new();
+        for svc in ["k3s", "amiterra"] {
+            let out = Command::new("systemctl").args(["start", svc]).output();
+            match out {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => failed.push(format!(
+                    "{svc}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                )),
+                Err(e) => failed.push(format!("{svc}: {e}")),
+            }
+        }
+        if !failed.is_empty() {
+            sp.fail("Failed to start production server services");
+            bail!("service start failed:\n  {}", failed.join("\n  "));
+        }
         sp.success("Production server services started");
         Ui::next_steps("Verify health:", &["$ ami status"]);
         Ok(())
@@ -547,8 +809,22 @@ impl EnvironmentBackend for LinuxServerBackend {
 
     fn down(&self, _ctx: &ExecutionContext) -> Result<()> {
         let sp = Ui::spinner("Stopping Amiterra Production Server services...");
-        let _ = Command::new("systemctl").args(["stop", "amiterra"]).status();
-        let _ = Command::new("systemctl").args(["stop", "k3s"]).status();
+        let mut failed = Vec::new();
+        for svc in ["amiterra", "k3s"] {
+            let out = Command::new("systemctl").args(["stop", svc]).output();
+            match out {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => failed.push(format!(
+                    "{svc}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                )),
+                Err(e) => failed.push(format!("{svc}: {e}")),
+            }
+        }
+        if !failed.is_empty() {
+            sp.fail("Failed to stop some services");
+            bail!("service stop failed:\n  {}", failed.join("\n  "));
+        }
         sp.success("Server services stopped");
         Ok(())
     }
@@ -598,6 +874,85 @@ impl EnvironmentBackend for LinuxServerBackend {
             },
         ];
 
+        // Feature states (opt-in features report their own durable state).
+        match crate::tune::status() {
+            Ok(t) => metrics.push(StatusMetric {
+                label: "Performance Profile".to_string(),
+                value: if t.performance_applied {
+                    "● applied (BBR, limits, swappiness)".to_string()
+                } else if t.platform_applied {
+                    "◐ platform prep only (run `sudo ami tune apply`)".to_string()
+                } else {
+                    "○ not applied (run `sudo ami tune apply`)".to_string()
+                },
+            }),
+            Err(_) => metrics.push(StatusMetric {
+                label: "Performance Profile".to_string(),
+                value: "○ unknown (tune state unreadable)".to_string(),
+            }),
+        }
+        match crate::gitops::status() {
+            Ok(g) => metrics.push(StatusMetric {
+                label: "GitOps (Flux)".to_string(),
+                value: if g.installed {
+                    // M1: report live sync state, not just "state.yaml says bootstrapped".
+                    let sync = match g.sync {
+                        crate::gitops::flux::SyncHealth::Ready => "synced",
+                        crate::gitops::flux::SyncHealth::Degraded => "sync degraded",
+                        crate::gitops::flux::SyncHealth::NotInstalled => "flux missing",
+                        crate::gitops::flux::SyncHealth::Unknown => "sync unknown",
+                    };
+                    match &g.state {
+                        Some(s) => format!("● bootstrapped (branch {}, {sync})", s.branch),
+                        None => format!("● bootstrapped ({sync})"),
+                    }
+                } else if g.private_key_present {
+                    "◐ deploy key present — not bootstrapped (run `sudo ami gitops bootstrap`)"
+                        .to_string()
+                } else {
+                    "○ not bootstrapped (run `sudo ami gitops bootstrap`)".to_string()
+                },
+            }),
+            Err(_) => metrics.push(StatusMetric {
+                label: "GitOps (Flux)".to_string(),
+                value: "○ unknown (gitops state unreadable)".to_string(),
+            }),
+        }
+        {
+            let inv = crate::storage::inventory::StorageInventory::probe().unwrap_or_default();
+            let summary = crate::storage::classify(&inv);
+            let vg_note = if crate::storage::prepare::dedicated_vg_present(
+                crate::storage::prepare::DEFAULT_VG,
+            ) {
+                " · VG amiterra-data ready"
+            } else {
+                ""
+            };
+            metrics.push(StatusMetric {
+                label: "Storage".to_string(),
+                value: format!(
+                    "{} {} · policy {}{vg_note}",
+                    summary.tier.as_str(),
+                    summary.storage_class.as_str(),
+                    summary.policy_label()
+                ),
+            });
+        }
+        {
+            let wg =
+                fs::read_to_string("/var/lib/rancher/k3s/server/manifests/cilium-helmchart.yaml")
+                    .map(|m| m.contains("type: wireguard"))
+                    .unwrap_or(false);
+            metrics.push(StatusMetric {
+                label: "WireGuard Mesh".to_string(),
+                value: if wg {
+                    "● Active (Transparent WAN encryption)".to_string()
+                } else {
+                    "○ Disabled (Private network)".to_string()
+                },
+            });
+        }
+
         if let Ok(bbr) = fs::read_to_string("/proc/sys/net/ipv4/tcp_congestion_control") {
             metrics.push(StatusMetric {
                 label: "TCP Congestion".to_string(),
@@ -631,28 +986,76 @@ impl EnvironmentBackend for LinuxServerBackend {
         })
     }
 
-    fn uninstall(&self, _ctx: &ExecutionContext, _purge: bool) -> Result<()> {
+    fn uninstall(&self, _ctx: &ExecutionContext, purge: bool) -> Result<()> {
+        let mut failures = Vec::new();
+
         if Path::new("/etc/systemd/system/amiterra.service").exists() {
-            let _ = Command::new("systemctl").args(["stop", "amiterra"]).status();
-            let _ = Command::new("systemctl").args(["disable", "amiterra"]).status();
-            let _ = fs::remove_file("/etc/systemd/system/amiterra.service");
-            Ui::step_done("Removed systemd service amiterra.service", None);
+            for act in [
+                ["stop", "amiterra"].as_slice(),
+                ["disable", "amiterra"].as_slice(),
+            ] {
+                if let Ok(o) = Command::new("systemctl").args(act).output()
+                    && !o.status.success()
+                {
+                    failures.push(format!(
+                        "systemctl {} amiterra: {}",
+                        act[0],
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ));
+                }
+            }
+            if let Err(e) = fs::remove_file("/etc/systemd/system/amiterra.service") {
+                failures.push(format!("remove amiterra.service: {e}"));
+            } else {
+                Ui::step_done("Removed systemd service amiterra.service", None);
+            }
         }
 
-        if Path::new("/usr/local/bin/k3s-uninstall.sh").exists() {
-            let sp = Ui::spinner("Running K3s uninstaller...");
-            let _ = Command::new("/usr/local/bin/k3s-uninstall.sh").status();
-            sp.success("K3s cluster uninstalled");
+        // k3s uninstallers are verbose by design (xtrace, umount listings) —
+        // capture their output; noise is surfaced only when a script fails.
+        for (script, label) in [
+            ("/usr/local/bin/k3s-uninstall.sh", "K3s cluster"),
+            ("/usr/local/bin/k3s-agent-uninstall.sh", "K3s agent"),
+        ] {
+            if Path::new(script).exists() {
+                let sp = Ui::spinner(format!("Running {} uninstaller...", label));
+                match crate::cleanup::run_k3s_uninstaller(script) {
+                    Ok(()) => sp.success(&format!("{label} uninstalled")),
+                    Err(e) => {
+                        sp.fail(&format!("{label} uninstaller failed"));
+                        failures.push(format!("{label} uninstaller: {e:#}"));
+                    }
+                }
+            }
         }
 
-        if Path::new("/usr/local/bin/k3s-agent-uninstall.sh").exists() {
-            let sp = Ui::spinner("Running K3s agent uninstaller...");
-            let _ = Command::new("/usr/local/bin/k3s-agent-uninstall.sh").status();
-            sp.success("K3s agent uninstalled");
+        // Cilium datapath cleanup: the k3s uninstaller knows only its own
+        // stack (flannel/cni0); our CNI leaves interfaces, routes and
+        // netfilter chains behind — they pollute the host and confuse the
+        // next install's CIDR auto-detection.
+        let sp = Ui::spinner("Cleaning Cilium datapath leftovers...");
+        let report = crate::cleanup::cleanup_cilium_datapath();
+        if report.removed.is_empty() && report.failed.is_empty() {
+            sp.success("No Cilium datapath leftovers");
+        } else {
+            sp.success(&format!(
+                "Removed {} Cilium leftover(s)",
+                report.removed.len()
+            ));
+        }
+        for f in &report.failed {
+            Ui::step_warn(&format!("could not remove {f}"));
+        }
+
+        // GitOps system account (the repository itself is data — purge's job).
+        for desc in crate::cleanup::remove_git_user(crate::gitops::local_bare::GIT_USER) {
+            Ui::step_done(&format!("Removed {desc}"), None);
         }
 
         // Restore tuned host state (performance profile + platform prep + legacy).
-        let _ = crate::tune::rollback(true);
+        if let Err(e) = crate::tune::rollback(true) {
+            Ui::step_warn(&format!("tune rollback during uninstall failed: {e:#}"));
+        }
         let mut removed_any = false;
         for path in [
             crate::tune::LEGACY_SYSCTL_PATH,
@@ -667,38 +1070,75 @@ impl EnvironmentBackend for LinuxServerBackend {
             }
         }
         // Only reload on Linux when drop-ins changed (macOS `sysctl` has no --system).
-        if removed_any {
-            crate::tune::reload_sysctl();
+        if removed_any && let Err(e) = crate::tune::reload_sysctl() {
+            Ui::step_warn(&format!("sysctl reload after cleanup failed: {e:#}"));
         }
 
-        if _purge {
-            let _ = fs::remove_dir_all("/etc/amiterra");
-            let _ = fs::remove_dir_all("/var/lib/amiterra");
+        if purge {
+            for dir in ["/etc/amiterra", "/var/lib/amiterra"] {
+                if !Path::new(dir).exists() {
+                    continue;
+                }
+                match fs::remove_dir_all(dir) {
+                    Ok(()) => Ui::step_done(&format!("Removed {dir}"), None),
+                    Err(e) => failures.push(format!("purge {dir}: {e}")),
+                }
+            }
         }
 
+        if !failures.is_empty() {
+            bail!(
+                "uninstall incomplete — host may be partially restored:\n  {}",
+                failures.join("\n  ")
+            );
+        }
         Ok(())
     }
+}
+
+/// Escape a scalar for a double-quoted YAML string: prevents structure
+/// injection when values arrive from discovery, wizard or CLI input.
+fn yaml_dq(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    for c in v.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub fn render_k3s_config(config: &ClusterNodeConfig) -> String {
     let mut yaml = String::new();
     yaml.push_str("# Amiterra Production Headless K3s Configuration\n");
-    yaml.push_str(&format!("node-ip: \"{}\"\n", config.node_ip));
+    yaml.push_str(&format!("node-ip: \"{}\"\n", yaml_dq(&config.node_ip)));
     if let Some(ext) = &config.node_external_ip {
-        yaml.push_str(&format!("node-external-ip: \"{}\"\n", ext));
+        yaml.push_str(&format!("node-external-ip: \"{}\"\n", yaml_dq(ext)));
     }
     if config.role.is_control_plane() {
         yaml.push_str("flannel-backend: \"none\"\n");
         yaml.push_str("disable-network-policy: true\n");
         yaml.push_str("disable-kube-proxy: true\n");
         yaml.push_str("disable:\n  - traefik\n  - servicelb\n  - local-storage\n");
-        yaml.push_str(&format!("cluster-cidr: \"{}\"\n", config.pod_cidr));
-        yaml.push_str(&format!("service-cidr: \"{}\"\n", config.service_cidr));
+        yaml.push_str(&format!(
+            "cluster-cidr: \"{}\"\n",
+            yaml_dq(&config.pod_cidr)
+        ));
+        yaml.push_str(&format!(
+            "service-cidr: \"{}\"\n",
+            yaml_dq(&config.service_cidr)
+        ));
 
         if !config.tls_sans.is_empty() {
             yaml.push_str("tls-san:\n");
             for san in &config.tls_sans {
-                yaml.push_str(&format!("  - \"{}\"\n", san));
+                yaml.push_str(&format!("  - \"{}\"\n", yaml_dq(san)));
             }
         }
 
@@ -708,10 +1148,10 @@ pub fn render_k3s_config(config: &ClusterNodeConfig) -> String {
     }
 
     if let Some(url) = &config.server_url {
-        yaml.push_str(&format!("server: \"{}\"\n", url));
+        yaml.push_str(&format!("server: \"{}\"\n", yaml_dq(url)));
     }
     if let Some(tok) = &config.cluster_token {
-        yaml.push_str(&format!("token: \"{}\"\n", tok));
+        yaml.push_str(&format!("token: \"{}\"\n", yaml_dq(tok)));
     }
 
     if config.isolate_control_plane && config.role.is_control_plane() {
@@ -730,7 +1170,23 @@ fn write_tailored_k3s_config(config: &ClusterNodeConfig) -> Result<()> {
     let content = render_k3s_config(config);
     let config_path = Path::new("/etc/rancher/k3s/config.yaml");
     backup_file_if_exists(config_path)?;
-    fs::write(config_path, content)?;
+    // The config holds the cluster join token — 0600, owner-only.
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(config_path)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        f.write_all(content.as_bytes())
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(config_path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to chmod {}", config_path.display()))?;
     Ok(())
 }
 
@@ -789,7 +1245,6 @@ fn deploy_cilium_manifest(wireguard_enabled: bool) -> Result<()> {
     Ok(())
 }
 
-
 fn install_k3s_binary(config: &ClusterNodeConfig) -> Result<()> {
     let has_curl = Command::new("curl")
         .arg("--version")
@@ -797,7 +1252,9 @@ fn install_k3s_binary(config: &ClusterNodeConfig) -> Result<()> {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !has_curl {
-        bail!("'curl' command is required to install K3s. Please install curl (e.g. apt-get install -y curl).");
+        bail!(
+            "'curl' command is required to install K3s. Please install curl (e.g. apt-get install -y curl)."
+        );
     }
 
     let exec_type = if config.role == NodeRole::Worker {
@@ -805,15 +1262,19 @@ fn install_k3s_binary(config: &ClusterNodeConfig) -> Result<()> {
     } else {
         "server"
     };
+    // Timeouts bound the supply-chain window and prevent a hung mirror from
+    // stalling init forever; `pipefail` surfaces curl failures to the exit code.
     let cmd = format!(
-        "set -e -o pipefail; curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_START=true INSTALL_K3S_CHANNEL=\"v1.31\" INSTALL_K3S_EXEC=\"{}\" sh -s -",
+        "set -e -o pipefail; curl -sfL --connect-timeout 30 --max-time 300 https://get.k3s.io | INSTALL_K3S_SKIP_START=true INSTALL_K3S_VERSION=\"v1.37.1+k3s1\" INSTALL_K3S_EXEC=\"{}\" sh -s -",
         exec_type
     );
     let output = Command::new("sh").arg("-c").arg(&cmd).output();
     match output {
         Ok(out) if out.status.success() => {
             if !Path::new("/usr/local/bin/k3s").exists() {
-                bail!("K3s installer completed with status 0, but /usr/local/bin/k3s was not created on disk.");
+                bail!(
+                    "K3s installer completed with status 0, but /usr/local/bin/k3s was not created on disk."
+                );
             }
             Ok(())
         }
@@ -825,29 +1286,11 @@ fn install_k3s_binary(config: &ClusterNodeConfig) -> Result<()> {
     }
 }
 
-/// Best-effort node labeling for placement Advisor (Design 0019).
-fn apply_storage_node_labels(summary: &crate::storage::StoragePlanSummary) -> Result<()> {
-    let hostname = Command::new("hostname")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "localhost".into());
-    for (key, val) in crate::storage::node_labels(
-        &summary.storage_class,
-        &summary.tier,
-        &summary.policy_label(),
-    ) {
-        let arg = format!("{key}={val}");
-        let _ = Command::new("k3s")
-            .args([
-                "kubectl",
-                "label",
-                "node",
-                &hostname,
-                &arg,
-                "--overwrite",
-            ])
-            .output();
-    }
+/// Best-effort node labeling for the placement advisor.
+fn apply_storage_node_labels(_summary: &crate::storage::StoragePlanSummary) -> Result<()> {
+    // Shared implementation lives in the storage module (also used by
+    // `ami storage prepare` so tier labels refresh in the same run).
+    crate::storage::refresh_node_labels();
     Ok(())
 }
 
@@ -855,11 +1298,18 @@ fn wait_for_node_readiness(timeout_secs: u64) -> Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_secs() < timeout_secs {
         let out = Command::new("k3s")
-            .args(["kubectl", "get", "nodes"])
+            .args(["kubectl", "get", "nodes", "--no-headers"])
             .output();
         if let Ok(o) = out {
-            let s = String::from_utf8_lossy(&o.stdout);
-            if s.contains("Ready") {
+            // STATUS is the second whitespace-separated column; `NotReady`
+            // must not match a naive substring search for "Ready".
+            let ready = String::from_utf8_lossy(&o.stdout).lines().any(|l| {
+                l.split_whitespace()
+                    .nth(1)
+                    .map(|s| s == "Ready")
+                    .unwrap_or(false)
+            });
+            if ready {
                 return Ok(());
             }
         }
@@ -908,8 +1358,26 @@ WantedBy=multi-user.target
     let unit_path = Path::new("/etc/systemd/system/amiterra.service");
     fs::write(unit_path, unit_content)?;
 
-    let _ = Command::new("systemctl").arg("daemon-reload").output();
-    let _ = Command::new("systemctl").args(["enable", "--now", "amiterra"]).output();
+    let reload = Command::new("systemctl")
+        .arg("daemon-reload")
+        .output()
+        .context("failed to run systemctl daemon-reload")?;
+    if !reload.status.success() {
+        bail!(
+            "systemctl daemon-reload failed: {}",
+            String::from_utf8_lossy(&reload.stderr).trim()
+        );
+    }
+    let enable = Command::new("systemctl")
+        .args(["enable", "--now", "amiterra"])
+        .output()
+        .context("failed to run systemctl enable")?;
+    if !enable.status.success() {
+        bail!(
+            "failed to enable amiterra.service: {}",
+            String::from_utf8_lossy(&enable.stderr).trim()
+        );
+    }
     Ok(())
 }
 
@@ -939,6 +1407,32 @@ disable-kube-proxy: true
 disable:
   - traefik
   - servicelb
+"#;
+        let res = analyze_k3s_config(true, Some(sample), true);
+        assert_eq!(res, K3sInspection::CompliantAmiterraInstance);
+    }
+
+    #[test]
+    fn test_traefik_mention_in_comment_is_not_disabled() {
+        // Regression: substring "traefik" must not mean "traefik disabled".
+        let sample = r#"
+flannel-backend: "none"
+disable-kube-proxy: true
+# traefik is kept enabled here
+"#;
+        let res = analyze_k3s_config(true, Some(sample), true);
+        match res {
+            K3sInspection::ConflictingInstance { traefik_active, .. } => assert!(traefik_active),
+            other => panic!("expected ConflictingInstance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_disable_list_inline_form() {
+        let sample = r#"
+flannel-backend: none
+disable-kube-proxy: true
+disable: [traefik, servicelb]
 "#;
         let res = analyze_k3s_config(true, Some(sample), true);
         assert_eq!(res, K3sInspection::CompliantAmiterraInstance);
@@ -981,6 +1475,8 @@ node-ip: 10.0.0.5
             cluster_token: Some("secret123".to_string()),
             isolate_control_plane: true,
             apply_performance_tuning: false,
+            gitops_bootstrap: false,
+            storage: crate::features::StoragePlan::Skip,
         };
 
         let yaml = render_k3s_config(&config);
@@ -1006,6 +1502,8 @@ node-ip: 10.0.0.5
             cluster_token: Some("join-token".to_string()),
             isolate_control_plane: false,
             apply_performance_tuning: false,
+            gitops_bootstrap: false,
+            storage: crate::features::StoragePlan::Skip,
         };
 
         let yaml = render_k3s_config(&config);
@@ -1032,11 +1530,26 @@ node-ip: 10.0.0.5
 
     #[test]
     fn test_parse_remediation_choice_rejects_garbage() {
-        assert_eq!(parse_remediation_choice(""), Some(RemediationChoice::SafeMigration));
-        assert_eq!(parse_remediation_choice("1"), Some(RemediationChoice::SafeMigration));
-        assert_eq!(parse_remediation_choice("2"), Some(RemediationChoice::CleanReinstall));
-        assert_eq!(parse_remediation_choice("3"), Some(RemediationChoice::Abort));
-        assert_eq!(parse_remediation_choice("q"), Some(RemediationChoice::Abort));
+        assert_eq!(
+            parse_remediation_choice(""),
+            Some(RemediationChoice::SafeMigration)
+        );
+        assert_eq!(
+            parse_remediation_choice("1"),
+            Some(RemediationChoice::SafeMigration)
+        );
+        assert_eq!(
+            parse_remediation_choice("2"),
+            Some(RemediationChoice::CleanReinstall)
+        );
+        assert_eq!(
+            parse_remediation_choice("3"),
+            Some(RemediationChoice::Abort)
+        );
+        assert_eq!(
+            parse_remediation_choice("q"),
+            Some(RemediationChoice::Abort)
+        );
         // Regression: garbage must NOT become SafeMigration (host-modifying default).
         assert_eq!(parse_remediation_choice("4"), None);
         assert_eq!(parse_remediation_choice("yes"), None);

@@ -11,8 +11,7 @@
 //! - [`PerformanceProfile`] — reversible optimization (`ami tune apply`).
 
 /// Repository path of the tuning sources (documentation / CLI references).
-pub const TUNING_DOCS_URL: &str =
-    "https://github.com/amiterra/amiterra-cli/tree/main/tuning";
+pub const TUNING_DOCS_URL: &str = "https://github.com/amiterra/amiterra-cli/tree/main/tuning";
 
 /// Raw platform prep drop-in (with pipeline warning header).
 pub const PLATFORM_SYSCTL_TEXT: &str = include_str!("../../tuning/platform.sysctl");
@@ -102,7 +101,11 @@ mod tests {
     #[test]
     fn platform_and_performance_do_not_overlap() {
         let platform: Vec<String> = PlatformPrep.sysctl().into_iter().map(|e| e.key).collect();
-        let perf: Vec<String> = PerformanceProfile.sysctl().into_iter().map(|e| e.key).collect();
+        let perf: Vec<String> = PerformanceProfile
+            .sysctl()
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
         for k in &platform {
             assert!(!perf.contains(k), "key {k} in both layers");
         }

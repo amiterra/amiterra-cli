@@ -1,0 +1,178 @@
+= Safety & Reversibility
+:description: What ami changes on your host, what it never does, and how every change is undone.
+:keywords: safety, security, reversibility, trust, guardrails, secrets
+
+[.lead]
+Adopting infrastructure tooling is a trust decision. This page is the complete
+answer to "what will this do to my machine?" — what changes, what never
+changes, and how each change is reversed.
+
+== The core promise
+
+. **Nothing optional happens without your decision.** The base install is the
+  minimum for Kubernetes to work; every other layer (performance tuning,
+  GitOps, LVM) is opt-in via an explicit prompt, flag, or command.
+. **Every change is reversible.** Tuning captures a baseline before writing
+  and restores it on rollback. `ami uninstall` reverts the host.
+. **Secrets stay home.** Join tokens are not printed; deploy keys are generated
+  on the node and the private key never leaves it.
+. **Re-running is safe.** Commands converge to a desired state — a second run
+  changes nothing instead of compounding damage.
+
+== What `ami init` changes
+
+[cols="1,2,1"]
+|===
+|Change |Why |Reversed by
+
+|k3s installed and running (headless)
+|Kubernetes distribution; no Traefik/ServiceLB/flannel
+|`ami uninstall`
+
+|Cilium eBPF networking manifest
+|kube-proxy replacement, host routing, optional WireGuard
+|`ami uninstall`
+
+|Platform prep sysctls (`98-amiterra-platform.conf`)
+|Pod networking needs `ip_forward` etc.
+|`ami uninstall` / `ami tune rollback`
+
+|Data root + StorageClass
+|Universal stateful storage baseline
+|`ami uninstall --purge`
+
+|Config + state under `~/.amiterra/` and `/var/lib/amiterra/`
+|Remembers mode, baselines, and bootstrap state
+|`ami uninstall --purge`
+|===
+
+Optional layers (only when you opt in):
+
+[cols="1,2,1"]
+|===
+|Change |Why |Reversed by
+
+|Performance profile (`99-amiterra-tune.conf`, limits.d)
+|BBR, queue depths, file capacity, swappiness
+|`ami tune rollback`
+
+|Flux controllers + Git binding + deploy key
+|GitOps: Git is the source of truth
+|`ami gitops` disable (planned) / `ami uninstall`
+
+|Dedicated LVM data disk (volume + filesystem + mount)
+|I/O isolation for stateful workloads (tier s1)
+|`ami storage rollback`
+|===
+
+Each optional layer is gated three ways — interactive prompt (default Skip),
+an explicit flag (`--tune-apply`, `--gitops-bootstrap`, `--storage-disk`), or
+`--all-features`. `--yes` alone never enables them.
+
+== What `ami` never does
+
+* **Never touches firewall policy** (`ufw`), panic policy, BPF lockdown, or
+  disk schedulers — explicitly out of scope.
+* **Never applies blacklisted kernel parameters.** `kernel.core_pattern`,
+  `kernel.modprobe`, `fs.suid_dumpable`, `net.ipv4.ip_forward` (in tuning
+  profiles), panic keys — refused by guardrails regardless of input.
+* **Never prints join tokens.** Use `ami join-command` to reveal them
+  explicitly; install output shows the lookup command instead.
+* **Never sends telemetry or uploads secrets** without consent. Deploy key
+  fingerprints are shown for verification; private key material is not.
+* **Never rebinds a cluster to a different Git repository silently.** A second
+  node running bootstrap is refused — the existing binding wins.
+* **Never mutates the host in non-interactive sessions without `--yes`.**
+  Silent modification in scripts is treated as a bug.
+* **Never turns optional layers on implicitly.** `--yes` means "safe defaults"
+  (base install only), not "everything". Full installs require the explicit
+  `--all-features` key or per-layer flags.
+
+== Secrets model
+
+[cols="1,2"]
+|===
+|Secret |Handling
+
+|Cluster join token
+|Stored root-only; revealed only by `ami join-command`; never in logs or status
+
+|GitOps deploy key (private)
+|Generated on node (ed25519), mode `0600`, never transmitted; public key
+registered read-only
+
+|GitOps deploy key (public)
+|Registered with `git-upload-pack` forced command — fetch-only, even the key
+cannot push
+
+|Tuning baseline
+|Local file under `/var/lib/amiterra/`; used only for rollback
+|===
+
+Known-hosts entries are built from the node's own SSH host keys (zero-TOFU) —
+no trust-on-first-use in the standard flow.
+
+== Guardrails
+
+Every tuning parameter passes `SecurityGuardrails` before it can be written:
+
+* absolute blacklist of dangerous keys (never applied, by anyone);
+* numeric bounds per key (e.g. `vm.swappiness` 0–100, `somaxconn` ranges);
+* unknown or malformed values are rejected, not coerced.
+
+The policy envelope is enforced identically for `ami tune apply`, init-time
+application, and any future dynamic tuning.
+
+== Reversibility, demonstrated
+
+[source,bash]
+----
+# Tuning: full round-trip
+sudo ami tune plan       # see exactly what would change
+sudo ami tune apply      # baseline captured automatically
+sudo ami tune rollback   # host is back to the captured baseline
+
+# Storage: opt-in LVM, removable
+sudo ami storage prepare --disk nvme2n1
+sudo ami storage rollback --vg amiterra-data
+
+# Everything
+sudo ami uninstall        # revert host state (verified — the summary re-probes)
+sudo ami uninstall --purge  # + remove data and logs
+----
+
+`uninstall` claims "Host state restored" only after re-probing the host:
+Cilium datapath leftovers, system accounts and drop-ins are removed as part
+of the flow, and anything that could not be removed is listed explicitly.
+
+== Reliability characteristics
+
+* **Idempotent converge** — re-running `init`, `gitops bootstrap`, or `tune
+  apply` converges; it does not stack changes.
+* **Pinned versions** — k3s version and Flux manifests are pinned and verified
+  (SHA-256) at install/bootstrap time; no floating "latest".
+* **Fail-safe defaults** — readiness gates stop a flow before state is
+  recorded; a half-finished bootstrap reports honestly instead of claiming
+  success.
+* **Live health, not cached claims** — `ami status` probes real sync state;
+  "bootstrapped" on a broken sync is reported as degraded.
+
+== Supply chain
+
+* Installer verifies SHA-256 checksums before installing.
+* The single static binary embeds its tuning profiles and Flux manifests at
+  build time — what you audit is what runs.
+* Build from source if you prefer: `make build && make test`.
+
+== Your exit
+
+No lock-in: the cluster's desired state lives in *your* Git repository in plain
+YAML. Flux keeps reconciling from it with or without the `ami` binary. The
+license (FSL-1.1-ALv2) converts to Apache-2.0 on each release's second
+anniversary. See `LICENSE` and `TRADEMARK.md` in the repository root.
+
+== Related
+
+* xref:quickstart.adoc[Quickstart]
+* xref:faq.adoc[FAQ]
+* xref:commands.adoc[Command Reference]

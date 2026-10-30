@@ -105,42 +105,46 @@ pub fn scan_local_interfaces() -> Vec<NetworkInterface> {
 
     // Fallback for macOS / testing environments or if 'ip' command is unavailable
     if interfaces.is_empty()
-        && let Ok(output) = Command::new("ifconfig").output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut current_name = String::new();
-            for line in stdout.lines() {
-                if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(':') {
-                    current_name = line.split(':').next().unwrap_or("").to_string();
-                } else if line.trim().starts_with("inet ") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 && !is_ignored_interface(&current_name) {
-                        let ip = parts[1].to_string();
-                        if ip.is_empty() || ip.starts_with("127.") || ip.starts_with("169.254.") {
-                            continue;
-                        }
-                        let is_private = is_private_ip(&ip);
-                        let is_default = current_name == "en0" || current_name == "eth0";
-                        let mtu = 1500;
-                        interfaces.push(NetworkInterface {
-                            name: current_name.clone(),
-                            ip,
-                            cidr: "32".to_string(),
-                            is_private,
-                            is_default,
-                            mtu,
-                            is_storage: false,
-                        });
+        && let Ok(output) = Command::new("ifconfig").output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut current_name = String::new();
+        for line in stdout.lines() {
+            if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(':') {
+                current_name = line.split(':').next().unwrap_or("").to_string();
+            } else if line.trim().starts_with("inet ") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 && !is_ignored_interface(&current_name) {
+                    let ip = parts[1].to_string();
+                    if ip.is_empty() || ip.starts_with("127.") || ip.starts_with("169.254.") {
+                        continue;
                     }
+                    let is_private = is_private_ip(&ip);
+                    let is_default = current_name == "en0" || current_name == "eth0";
+                    let mtu = 1500;
+                    interfaces.push(NetworkInterface {
+                        name: current_name.clone(),
+                        ip,
+                        cidr: "32".to_string(),
+                        is_private,
+                        is_default,
+                        mtu,
+                        is_storage: false,
+                    });
                 }
             }
         }
+    }
 
     interfaces
 }
 
 /// Identifies the default route network interface via 'ip route show default'.
 pub fn get_default_interface() -> Option<String> {
-    if let Ok(output) = Command::new("ip").args(["route", "show", "default"]).output() {
+    if let Ok(output) = Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = stdout.split_whitespace().collect();
         for (i, part) in parts.iter().enumerate() {
@@ -183,7 +187,8 @@ pub fn classify_topology(
 
     // Topology 1: Single Public IP
     // Host has physical interface(s) with public IP and NO private RFC 1918 interfaces.
-    if private_ifaces.is_empty() && !public_ifaces.is_empty()
+    if private_ifaces.is_empty()
+        && !public_ifaces.is_empty()
         && let Some(best_pub) = public_ifaces
             .iter()
             .find(|i| i.is_default)
@@ -272,7 +277,11 @@ pub fn find_collision_free_cidrs(occupied: &[String]) -> (String, String, bool) 
     }
 
     warn!("Could not identify collision-free CIDRs from candidates, falling back to 10.42.0.0/16");
-    ("10.42.0.0/16".to_string(), "10.43.0.0/16".to_string(), false)
+    (
+        "10.42.0.0/16".to_string(),
+        "10.43.0.0/16".to_string(),
+        false,
+    )
 }
 
 /// Discovers occupied subnets via 'ip -4 route'.
@@ -311,8 +320,10 @@ pub fn generate_tls_sans(
     }
 
     if let Some(ext) = external_ip
-        && !ext.is_empty() && !sans.contains(&ext.to_string()) {
-            sans.push(ext.to_string());
+        && !ext.is_empty()
+        && !sans.contains(&ext.to_string())
+    {
+        sans.push(ext.to_string());
     }
 
     if !hostname.is_empty() && !sans.contains(&hostname.to_string()) {
@@ -345,8 +356,9 @@ pub fn is_rfc1918(ip: &str) -> bool {
     if ip.starts_with("172.") {
         let parts: Vec<&str> = ip.split('.').collect();
         if parts.len() >= 2
-            && let Ok(second) = parts[1].parse::<u8>() {
-                return (16..=31).contains(&second);
+            && let Ok(second) = parts[1].parse::<u8>()
+        {
+            return (16..=31).contains(&second);
         }
     }
     false
@@ -361,8 +373,9 @@ pub fn is_private_ip(ip: &str) -> bool {
     if ip.starts_with("100.") {
         let parts: Vec<&str> = ip.split('.').collect();
         if parts.len() >= 2
-            && let Ok(second) = parts[1].parse::<u8>() {
-                return (64..=127).contains(&second);
+            && let Ok(second) = parts[1].parse::<u8>()
+        {
+            return (64..=127).contains(&second);
         }
     }
     false
@@ -379,7 +392,10 @@ pub fn find_route_to_target(target_ip: &str) -> Option<(String, String)> {
     #[cfg(unix)]
     {
         // 1. Try Linux 'ip route get <target>'
-        if let Ok(output) = Command::new("ip").args(["route", "get", clean_target]).output() {
+        if let Ok(output) = Command::new("ip")
+            .args(["route", "get", clean_target])
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let parts: Vec<&str> = stdout.split_whitespace().collect();
             let mut dev = None;
@@ -398,7 +414,10 @@ pub fn find_route_to_target(target_ip: &str) -> Option<(String, String)> {
         }
 
         // 2. Fallback: BSD / macOS 'route -n get <target>'
-        if let Ok(output) = Command::new("route").args(["-n", "get", clean_target]).output() {
+        if let Ok(output) = Command::new("route")
+            .args(["-n", "get", clean_target])
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut dev = None;
             for line in stdout.lines() {
@@ -441,8 +460,9 @@ pub fn extract_host_from_url(url: &str) -> Option<String> {
 fn read_interface_mtu(name: &str) -> u32 {
     let path = format!("/sys/class/net/{}/mtu", name);
     if let Ok(content) = fs::read_to_string(path)
-        && let Ok(mtu) = content.trim().parse::<u32>() {
-            return mtu;
+        && let Ok(mtu) = content.trim().parse::<u32>()
+    {
+        return mtu;
     }
     1500
 }
@@ -609,10 +629,8 @@ mod tests {
         assert!(!prevented);
 
         // Conflicting default 10.42.0.0
-        let (pod, svc, prevented) = find_collision_free_cidrs(&[
-            "10.42.0.0/24".to_string(),
-            "10.44.0.0/24".to_string(),
-        ]);
+        let (pod, svc, prevented) =
+            find_collision_free_cidrs(&["10.42.0.0/24".to_string(), "10.44.0.0/24".to_string()]);
         assert_eq!(pod, "10.244.0.0/16");
         assert_eq!(svc, "10.96.0.0/16");
         assert!(prevented);

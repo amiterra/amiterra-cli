@@ -1,10 +1,14 @@
 pub mod capabilities;
+pub mod cleanup;
 mod cli;
 mod context;
 mod daemon;
 pub mod discovery;
+pub mod features;
+pub mod gitops;
 pub mod guardrails;
 mod installer;
+pub mod join_command;
 mod preflight;
 mod providers;
 pub mod storage;
@@ -57,8 +61,8 @@ async fn async_main() -> anyhow::Result<()> {
         _ => "warn",
     };
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -90,7 +94,7 @@ async fn async_main() -> anyhow::Result<()> {
                     }),
                 })?;
             } else {
-                let report = preflight::run_preflight(args.server);
+                let report = preflight::run_preflight();
                 if args.json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
@@ -101,15 +105,21 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Commands::Tune(args)) => {
             tune::cli::handle_tune(args)?;
         }
+        Some(Commands::Gitops(args)) => {
+            gitops::cli::handle_gitops(args)?;
+        }
+        Some(Commands::JoinCommand { role, json }) => {
+            join_command::handle(role.as_deref(), json)?;
+        }
         Some(Commands::Storage(args)) => {
             storage::cli::handle_storage(args)?;
         }
         Some(Commands::Uninstall(args)) => {
             installer::handle_uninstall(args).await?;
         }
-        Some(Commands::Daemon(_args)) => {
+        Some(Commands::Daemon(args)) => {
             tracing::info!("Starting Amiterra Daemon (Day 2)...");
-            daemon::run().await?;
+            daemon::run(Some(std::path::PathBuf::from(args.config))).await?;
         }
         None => {
             installer::handle_init(InitArgs::default()).await?;

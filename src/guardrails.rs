@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use tracing::error;
 
 /// Result of validating a system parameter against the host security policy.
@@ -40,60 +40,48 @@ impl SecurityGuardrails {
 
         // 2. Validate known tuning parameters against strict numerical/enum bounds
         match norm_key.as_str() {
-            k if k.ends_with("vm.max_map_count") => {
-                match value.trim().parse::<u64>() {
-                    Ok(val) if (65_536..=16_777_216).contains(&val) => GuardrailDecision::Allowed,
-                    _ => GuardrailDecision::Rejected(format!(
-                        "vm.max_map_count must be between 65,536 and 16,777,216, got '{}'",
-                        value
-                    )),
-                }
-            }
-            k if k.ends_with("vm.swappiness") => {
-                match value.trim().parse::<u32>() {
-                    Ok(val) if val <= 100 => GuardrailDecision::Allowed,
-                    _ => GuardrailDecision::Rejected(format!(
-                        "vm.swappiness must be between 0 and 100, got '{}'",
-                        value
-                    )),
-                }
-            }
-            k if k.ends_with("vm.dirty_background_ratio") => {
-                match value.trim().parse::<u32>() {
-                    Ok(val) if (1..=50).contains(&val) => GuardrailDecision::Allowed,
-                    _ => GuardrailDecision::Rejected(format!(
-                        "vm.dirty_background_ratio must be between 1 and 50, got '{}'",
-                        value
-                    )),
-                }
-            }
-            k if k.ends_with("vm.dirty_ratio") => {
-                match value.trim().parse::<u32>() {
-                    Ok(val) if (5..=80).contains(&val) => GuardrailDecision::Allowed,
-                    _ => GuardrailDecision::Rejected(format!(
-                        "vm.dirty_ratio must be between 5 and 80, got '{}'",
-                        value
-                    )),
-                }
-            }
-            k if k.ends_with("net.core.somaxconn") => {
-                match value.trim().parse::<u32>() {
-                    Ok(val) if (1024..=65_535).contains(&val) => GuardrailDecision::Allowed,
-                    _ => GuardrailDecision::Rejected(format!(
-                        "net.core.somaxconn must be between 1024 and 65,535, got '{}'",
-                        value
-                    )),
-                }
-            }
-            k if k.ends_with("net.ipv4.tcp_max_syn_backlog") => {
-                match value.trim().parse::<u32>() {
-                    Ok(val) if (1024..=65_535).contains(&val) => GuardrailDecision::Allowed,
-                    _ => GuardrailDecision::Rejected(format!(
-                        "net.ipv4.tcp_max_syn_backlog must be between 1024 and 65,535, got '{}'",
-                        value
-                    )),
-                }
-            }
+            k if k.ends_with("vm.max_map_count") => match value.trim().parse::<u64>() {
+                Ok(val) if (65_536..=16_777_216).contains(&val) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "vm.max_map_count must be between 65,536 and 16,777,216, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("vm.swappiness") => match value.trim().parse::<u32>() {
+                Ok(val) if val <= 100 => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "vm.swappiness must be between 0 and 100, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("vm.dirty_background_ratio") => match value.trim().parse::<u32>() {
+                Ok(val) if (1..=50).contains(&val) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "vm.dirty_background_ratio must be between 1 and 50, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("vm.dirty_ratio") => match value.trim().parse::<u32>() {
+                Ok(val) if (5..=80).contains(&val) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "vm.dirty_ratio must be between 5 and 80, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("net.core.somaxconn") => match value.trim().parse::<u32>() {
+                Ok(val) if (1024..=65_535).contains(&val) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "net.core.somaxconn must be between 1024 and 65,535, got '{}'",
+                    value
+                )),
+            },
+            k if k.ends_with("net.ipv4.tcp_max_syn_backlog") => match value.trim().parse::<u32>() {
+                Ok(val) if (1024..=65_535).contains(&val) => GuardrailDecision::Allowed,
+                _ => GuardrailDecision::Rejected(format!(
+                    "net.ipv4.tcp_max_syn_backlog must be between 1024 and 65,535, got '{}'",
+                    value
+                )),
+            },
             k if k.contains("transparent_hugepage.enabled") => {
                 let v = value.trim();
                 if v == "always" || v == "madvise" || v == "never" {
@@ -140,7 +128,10 @@ impl SecurityGuardrails {
             },
             k if k.ends_with("net.core.default_qdisc") => {
                 let v = value.trim();
-                if matches!(v, "fq" | "fq_codel" | "pfifo_fast" | "codel" | "cake" | "noqueue") {
+                if matches!(
+                    v,
+                    "fq" | "fq_codel" | "pfifo_fast" | "codel" | "cake" | "noqueue"
+                ) {
                     GuardrailDecision::Allowed
                 } else {
                     GuardrailDecision::Rejected(format!(
@@ -197,10 +188,9 @@ impl SecurityGuardrails {
             },
             k if k.ends_with("arp_ignore") => match value.trim().parse::<u32>() {
                 Ok(v) if v <= 8 => GuardrailDecision::Allowed,
-                _ => GuardrailDecision::Rejected(format!(
-                    "arp_ignore must be 0-8, got '{}'",
-                    value
-                )),
+                _ => {
+                    GuardrailDecision::Rejected(format!("arp_ignore must be 0-8, got '{}'", value))
+                }
             },
             k if k.ends_with("fs.file-max") => match value.trim().parse::<u64>() {
                 Ok(v) if (10_000..=10_000_000).contains(&v) => GuardrailDecision::Allowed,
@@ -273,8 +263,7 @@ mod tests {
         // Platform prep may set this at install time; dynamic path must never.
         let res = SecurityGuardrails::validate_parameter("net.ipv4.ip_forward", "1");
         assert!(matches!(res, GuardrailDecision::Rejected(_)));
-        let res2 =
-            SecurityGuardrails::validate_parameter("net.ipv6.conf.all.forwarding", "1");
+        let res2 = SecurityGuardrails::validate_parameter("net.ipv6.conf.all.forwarding", "1");
         assert!(matches!(res2, GuardrailDecision::Rejected(_)));
     }
 

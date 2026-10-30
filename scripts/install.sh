@@ -41,7 +41,7 @@ run_ami() {
 
     if [ $# -eq 0 ]; then
         exec "${INSTALL_DIR}/amiterra" init
-    elif [ "$1" = "--dev" ] || [ "$1" = "--server" ] || [ "$1" = "--dry-run" ] || [ "$1" = "-y" ] || [ "$1" = "--yes" ]; then
+    elif [ "$1" = "--dry-run" ] || [ "$1" = "-y" ] || [ "$1" = "--yes" ] || [ "$1" = "--all-features" ]; then
         exec "${INSTALL_DIR}/amiterra" init "$@"
     else
         exec "${INSTALL_DIR}/amiterra" "$@"

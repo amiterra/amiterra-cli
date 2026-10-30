@@ -1,0 +1,74 @@
+= Install
+:description: Install the Amiterra CLI on Linux or macOS, verify the checksum, or build from source.
+:keywords: install, CLI, binary, checksum, verify
+
+== Prebuilt binaries
+
+[source,bash]
+----
+curl -fsSL https://get.amiterra.io | bash
+ami --version
+----
+
+The installer detects `linux/amd64`, `linux/arm64`, and `darwin/arm64`, verifies
+the download against its published SHA-256 checksum, and installs `ami` to
+`/usr/local/bin`. Nothing else is written to the host at this stage — system
+changes happen only when you run `ami init` (and only what you approve there).
+
+=== Verify manually
+
+If you prefer checking the checksum yourself:
+
+[source,bash]
+----
+curl -fsSL https://get.amiterra.io/SHA256SUMS -o SHA256SUMS
+curl -fsSL https://get.amiterra.io/ami-linux-amd64 -o ami
+shasum -a 256 -c SHA256SUMS --ignore-missing
+install -m 0755 ami /usr/local/bin/ami
+----
+
+=== Package managers
+
+[source,bash]
+----
+# Homebrew (macOS / Linux)
+brew install amiterra/tap/ami
+
+# Debian / Ubuntu
+curl -fsSL https://get.amiterra.io/apt/gpg | sudo tee /etc/apt/keyrings/amiterra.gpg
+echo "deb [signed-by=/etc/apt/keyrings/amiterra.gpg] https://get.amiterra.io/apt stable main" | sudo tee /etc/apt/sources.list.d/amiterra.list
+sudo apt update && sudo apt install ami
+----
+
+== From source
+
+[source,bash]
+----
+git clone https://github.com/amiterra/amiterra-cli.git
+cd amiterra-cli
+make build
+sudo install -m 0755 target/release/amiterra /usr/local/bin/ami
+----
+
+Build requirements: Rust 1.85+ (edition 2024). `make test` runs the unit suite;
+`make test-cluster` runs the full multi-node lifecycle test in local QEMU VMs.
+
+== Air-gapped install
+
+Copy the statically linked binary to the target host — there is no runtime
+dependency to fetch:
+
+[source,bash]
+----
+scp ami-linux-amd64 root@node:/usr/local/bin/ami
+ssh root@node 'ami --version && ami doctor'
+----
+
+The GitOps layer (Flux controllers) is *vendored into the binary* with a pinned
+checksum, so `ami gitops bootstrap` also works without internet access.
+
+== Next
+
+* xref:quickstart.adoc[Quickstart] — first node in a few minutes
+* xref:safety.adoc[Safety & Reversibility] — what init changes and how to undo it
+* xref:commands.adoc[Command Reference]

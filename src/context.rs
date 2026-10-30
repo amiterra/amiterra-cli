@@ -75,26 +75,35 @@ pub struct ExecutionContext {
 impl ExecutionContext {
     /// Automatically detects or resolves the execution context based on CLI flags,
     /// persisted configuration, or host environment capabilities.
-    pub fn resolve(force_dev: bool, force_server: bool) -> Self {
+    /// Resolve the execution context for lifecycle commands (`up`/`down`/`status`).
+    ///
+    /// Mode resolution (no mode flags — one unified flow):
+    /// saved config → host heuristics (k3s service, amiterra unit) → Workstation default.
+    pub fn resolve() -> Self {
+        Self::resolve_with_mode(None)
+    }
+
+    /// Resolve with an explicit mode (init: picked target; join: always server).
+    /// `None` falls back to the [`Self::resolve`] chain.
+    pub fn resolve_with_mode(mode: Option<EnvironmentMode>) -> Self {
         let home_dir = Self::resolve_amiterra_home();
         let bin_dir = std::env::var("AMITERRA_INSTALL_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home_dir.join("bin"));
         let config_path = home_dir.join("config.yaml");
 
-        let mode = if force_server {
-            EnvironmentMode::Server
-        } else if force_dev {
-            EnvironmentMode::Workstation
-        } else if let Some(saved_mode) = Self::load_saved_mode(&config_path) {
-            saved_mode
-        } else if Path::new("/etc/amiterra.conf").exists()
-            || Path::new("/etc/systemd/system/amiterra.service").exists()
-        {
-            EnvironmentMode::Server
-        } else {
-            EnvironmentMode::Workstation
-        };
+        let mode = mode
+            .or_else(|| Self::load_saved_mode(&config_path))
+            .or_else(|| {
+                if Path::new("/etc/amiterra.conf").exists()
+                    || Path::new("/etc/systemd/system/amiterra.service").exists()
+                {
+                    Some(EnvironmentMode::Server)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(EnvironmentMode::Workstation);
 
         Self {
             mode,
@@ -127,7 +136,19 @@ impl ExecutionContext {
             return p.to_path_buf();
         }
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        // HOME may be absent in minimal/systemd contexts. Never fall back to
+        // /tmp for root — a world-writable directory enables symlink attacks
+        // against config writes.
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| {
+                if crate::preflight::is_root() {
+                    "/root".to_string()
+                } else {
+                    "/tmp".to_string()
+                }
+            });
         let default_dir = Path::new(&home).join(".amiterra");
         if fs::create_dir_all(&default_dir).is_ok() {
             let probe = default_dir.join(".write_probe");

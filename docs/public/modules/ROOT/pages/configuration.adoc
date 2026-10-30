@@ -1,0 +1,106 @@
+= Configuration
+:description: Environment variables, state locations, and config file for `ami`.
+:keywords: configuration, env vars, paths, automation
+
+[.lead]
+`ami` works with zero configuration out of the box. This page covers the knobs
+for automation and non-standard layouts.
+
+== Environment variables
+
+[cols="1,2,1"]
+|===
+|Variable |Description |Default
+
+|`AMITERRA_HOME`
+|State directory (config, baselines, deploy keys)
+|`~/.amiterra`
+
+|`AMITERRA_INSTALL_DIR`
+|Where the binary is expected / installed
+|platform default
+
+|`AMITERRA_SKIP_RUNTIME_CHECK`
+|Skip container-runtime probing in workstation mode
+|unset
+
+|`AMITERRA_SANDBOX_SCRIPT`
+|Path override for the sandbox VM script
+|auto-detected
+
+|`NO_COLOR` / `CLICOLOR` / `CLICOLOR_FORCE`
+|Standard color control; respected automatically
+|auto
+
+|`TERM=dumb`
+|Disables color and animation
+|—
+|===
+
+== State and config locations
+
+[cols="1,2"]
+|===
+|Path |Contents
+
+|`~/.amiterra/config.yaml` (or `/etc/amiterra/config.yaml`)
+|Saved environment mode and cluster config written by `init`
+
+|`/var/lib/amiterra/`
+|Runtime state: tuning baseline, storage state, GitOps state and keys
+
+|`/etc/sysctl.d/98-amiterra-platform.conf`
+|Platform prep drop-in (written by `init`)
+
+|`/etc/sysctl.d/99-amiterra-tune.conf`
+|Performance profile drop-in (written by `tune apply`, removed on rollback)
+
+|`/etc/security/limits.d/99-amiterra.conf`
+|Process limits drop-in (written by `tune apply`)
+|===
+
+The config file is written and read by `ami` itself — you rarely need to edit
+it by hand. Unknown sections are ignored, so future keys do not break older
+binaries.
+
+== Machine-readable output
+
+Reporting commands support `--json`:
+
+[source,bash]
+----
+ami status --json | jq '.metrics'
+sudo ami gitops status --json | jq '.sync'
+sudo ami doctor --json
+----
+
+Exit codes are stable: `0` for success, non-zero for refusal or failure.
+Mutating commands refuse to run in non-interactive sessions without `--yes` —
+this is intentional, not a bug.
+
+== Automation patterns
+
+[source,bash]
+----
+# Non-interactive provisioning with explicit opt-ins
+sudo ami init -y --tune-apply --gitops-bootstrap --storage-disk nvme2n1
+
+# Everything on in one shot (cluster-init node)
+sudo ami init -y --all-features --role control-plane-init
+
+# Preview before committing
+sudo ami init --dry-run
+
+# CI check: is the node healthy?
+ami status --json | jq -e '.healthy == true'
+----
+
+`--yes` accepts safe defaults: the base install only. Optional layers require
+an explicit flag (or `--all-features`) — silent full installs are refused by
+design.
+
+== Related
+
+* xref:commands.adoc[Command Reference]
+* xref:safety.adoc[Safety & Reversibility]
+* xref:faq.adoc[FAQ]

@@ -56,7 +56,18 @@ pub fn handle_tune(args: TuneArgs) -> Result<()> {
             crate::tune::print_tuning_scope_warning();
             Ok(())
         }
-        TuneCommand::Apply { yes, dry_run } => apply(yes, dry_run),
+        TuneCommand::Apply { yes, dry_run } => {
+            apply(yes, dry_run)?;
+            // Verify hints belong to the standalone command; `ami init` runs
+            // apply() internally and prints its own final next steps.
+            if !dry_run {
+                crate::ui::Ui::next_steps(
+                    "Verify:",
+                    &["ami tune status", "sysctl net.ipv4.tcp_congestion_control"],
+                );
+            }
+            Ok(())
+        }
         TuneCommand::Rollback { yes } => rollback(yes),
         TuneCommand::Status { json } => {
             let st = status()?;
@@ -118,16 +129,15 @@ pub fn handle_tune(args: TuneArgs) -> Result<()> {
                 return Ok(());
             }
             if !yes {
-                use std::io::{stdin, stdout, IsTerminal, Write};
-                if stdin().is_terminal() {
-                    print!("  Apply platform prep? [y/N]: ");
-                    stdout().flush()?;
-                    let mut input = String::new();
-                    stdin().read_line(&mut input)?;
-                    if !input.trim().eq_ignore_ascii_case("y") {
+                // Non-interactive without --yes is refused inside confirm()
+                // (same invariant as `ami tune apply`).
+                match crate::tune::confirm("Apply platform prep?", false) {
+                    Ok(true) => {}
+                    Ok(false) => {
                         println!("  Aborted.");
                         return Ok(());
                     }
+                    Err(e) => return Err(e),
                 }
             }
             if !crate::preflight::is_root() {

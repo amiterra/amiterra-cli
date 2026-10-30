@@ -1,0 +1,152 @@
+= Quickstart
+:description: From a clean Ubuntu/Debian node to a running cluster — what to run, what to expect, and how to undo everything.
+:keywords: quickstart, tutorial, first run, init, join, gitops
+
+[.lead]
+This walkthrough takes a clean Ubuntu/Debian server to a running Kubernetes
+cluster with optional tuning and GitOps. Every step is opt-in and reversible.
+
+== 0. Before you start
+
+* A fresh Ubuntu/Debian host with root access (4 GB RAM minimum, 8 GB+ recommended
+  for stateful workloads), reachable on the network you want the cluster on.
+* `ami` installed (xref:install.adoc[Install]).
+* Two minutes to review xref:safety.adoc[Safety & Reversibility] if this is a
+  host you care about.
+
+Check readiness first — `doctor` is read-only:
+
+[source,bash]
+----
+sudo ami doctor
+----
+
+It verifies Linux, root, cgroups v2, kernel features (BTF, BBR), and shows what
+was detected. Fix anything it flags in red before continuing.
+
+== 1. Initialize the first node
+
+[source,bash]
+----
+sudo ami init
+----
+
+The wizard walks you through decisions *before* touching the host:
+
+. **Target environment** — one unified picker (Production Server, or a local
+  sandbox for laptops). Unavailable options stay visible with a reason and
+  cannot be selected.
+. **Network discovery** — shows the detected topology, node IP, and
+  collision-free pod/service subnets. Customize only if you know you need to.
+. **Node role** — Control Plane (Cluster Init) for the first node.
+. **Optional feature layers** — each one asks first, *Skip* is always the
+  default, and a layer that cannot apply to this host (e.g. storage with no
+  unallocated disks) says so explicitly instead of prompting silently:
+  * *Storage optimization* — dedicated LVM data disk (tier s1, I/O isolation);
+    only destructive to the disk you pick, never to system RAID.
+  * *Performance tuning* — for databases or latency-sensitive workloads;
+    reversible.
+  * *GitOps bootstrap* — Flux and a Git repository binding.
+
+Then `ami` installs k3s (pinned version, headless — no Traefik, no ServiceLB),
+deploys Cilium eBPF networking, and registers the node. Expect ~1 minute.
+
+TIP: Non-interactive? `sudo ami init -y` accepts safe defaults (base install
+only — optional layers stay **off**). Turn layers on explicitly with
+`--tune-apply`, `--gitops-bootstrap`, `--storage-disk <name>`, or enable every
+applicable layer at once with `--all-features`. `--dry-run` previews without
+changing anything.
+
+[source,bash]
+----
+# CI: everything on, dedicated disk, no prompts
+sudo ami init -y --all-features --storage-disk nvme2n1 --role control-plane-init
+----
+
+== 2. Verify
+
+[source,bash]
+----
+sudo ami status
+kubectl get nodes -o wide
+----
+
+`ami status` is your dashboard: k3s service, networking, tuning state, GitOps
+sync health, storage tier, and more. `--json` gives the same data for scripts.
+
+== 3. Optional layers, when you want them
+
+Everything below is skipped by default and can be run later — the base cluster
+does not depend on it.
+
+=== Performance tuning
+
+[source,bash]
+----
+sudo ami tune plan     # preview exactly which sysctls change
+sudo ami tune apply    # apply; baseline is captured first
+sudo ami tune rollback # restore the captured baseline at any time
+----
+
+=== GitOps (Flux + Git)
+
+[source,bash]
+----
+sudo ami gitops bootstrap --node-ip <node-ip>
+sudo ami gitops status
+----
+
+This provisions a local Git repository, generates a *read-only* deploy key on
+the node (the private key never leaves it), seeds the infrastructure layer,
+installs Flux (vendored, checksum-pinned), and binds Flux to the repository.
+Re-running is safe: the command converges and reports "Seed up to date".
+
+=== Storage tiers
+
+[source,bash]
+----
+sudo ami storage status   # tier + policy for this node
+sudo ami storage plan     # Order/Improve guide (read-only)
+sudo ami storage prepare --disk <disk>   # opt-in: dedicated LVM disk (tier s1)
+----
+
+`storage prepare` creates the LVM volume, formats it, mounts it at the data
+root, and refreshes tier labels in the same run. Reversible with
+`ami storage rollback`.
+
+== 4. Join more nodes
+
+On the *first* node, print the join command (it embeds the cluster token —
+treat it as a secret):
+
+[source,bash]
+----
+ami join-command worker          # or: ami join-command control-plane
+----
+
+Run the printed line on the joining node. That is the whole join flow.
+
+== 5. Undo everything (if you ever need to)
+
+[source,bash]
+----
+sudo ami tune rollback       # if you applied tuning
+sudo ami storage rollback --vg amiterra-data   # if you prepared a data disk
+sudo ami uninstall           # stop cluster, revert host state
+sudo ami uninstall --purge   # also remove data directories
+----
+
+`uninstall` restores sysctl baselines, removes components and the Cilium
+networking leftovers that the k3s uninstaller does not know about, then
+**re-probes the host** before claiming it is restored — anything that could
+not be removed is listed explicitly. With `--purge`, data directories go too;
+without it they are reported as kept. The host returns to its pre-`ami` state,
+and a fresh `ami init` afterwards detects a clean network and picks the
+default subnets again.
+
+== Where next
+
+* xref:commands.adoc[Command Reference] — every command and flag
+* xref:configuration.adoc[Configuration] — env vars and the config file
+* xref:faq.adoc[FAQ] — air-gapping, upgrades, multi-node, troubleshooting
+* xref:safety.adoc[Safety & Reversibility] — the full safety model

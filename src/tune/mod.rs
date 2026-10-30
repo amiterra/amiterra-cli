@@ -16,7 +16,7 @@
 //! - Baseline is captured before first change and restored on rollback.
 //! - Firewall policy (`ufw`) and panic policy are intentionally out of scope.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -30,8 +30,8 @@ pub mod cli;
 pub mod profile;
 
 pub use profile::{
-    parse_sysctl_entries, PerformanceProfile, PlatformPrep, SysctlEntry, TUNING_DOCS_URL,
-    LIMITS_TEXT, PERFORMANCE_SYSCTL_TEXT, PLATFORM_SYSCTL_TEXT,
+    LIMITS_TEXT, PERFORMANCE_SYSCTL_TEXT, PLATFORM_SYSCTL_TEXT, PerformanceProfile, PlatformPrep,
+    SysctlEntry, TUNING_DOCS_URL, parse_sysctl_entries,
 };
 
 /// Directory for persistent Amiterra state.
@@ -94,8 +94,8 @@ pub fn sysctl_proc_path(key: &str) -> PathBuf {
 /// Read current live value of a sysctl key.
 pub fn read_sysctl(key: &str) -> Result<String> {
     let path = sysctl_proc_path(key);
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     Ok(raw.trim().to_string())
 }
 
@@ -116,12 +116,22 @@ pub fn sysctl_reload_supported() -> bool {
 ///
 /// Linux uses `sysctl --system` (procps). macOS/BSD `sysctl` has no `--system`
 /// flag — invoking it there prints `illegal option` and is meaningless.
-pub fn reload_sysctl() {
+pub fn reload_sysctl() -> Result<()> {
     if !sysctl_reload_supported() {
-        return;
+        return Ok(());
     }
     // Capture stderr: never leak host tool noise into the user's terminal.
-    let _ = Command::new("sysctl").arg("--system").output();
+    let out = Command::new("sysctl")
+        .arg("--system")
+        .output()
+        .context("failed to run `sysctl --system`")?;
+    if !out.status.success() {
+        bail!(
+            "`sysctl --system` failed to reload drop-ins: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Print which OS subsystems the performance profile will touch, plus the
@@ -156,9 +166,7 @@ pub fn print_tuning_scope_warning() {
     );
     println!(
         "     {}",
-        Palette::dim(&format!(
-            "Parameter sources & docs: {TUNING_DOCS_URL}"
-        ))
+        Palette::dim(&format!("Parameter sources & docs: {TUNING_DOCS_URL}"))
     );
     println!(
         "     {}",
@@ -250,7 +258,7 @@ pub fn apply_platform_prep() -> Result<Vec<PlannedChange>> {
     // Write the embedded source verbatim (includes pipeline warning header).
     fs::write(PLATFORM_SYSCTL_PATH, platform.raw())
         .with_context(|| format!("Failed to write {}", PLATFORM_SYSCTL_PATH))?;
-    reload_sysctl();
+    reload_sysctl().context("platform prep written but `sysctl --system` reload failed")?;
 
     // Migrate away from the legacy combined file if present.
     if Path::new(LEGACY_SYSCTL_PATH).exists() {
@@ -263,10 +271,7 @@ pub fn apply_platform_prep() -> Result<Vec<PlannedChange>> {
 /// Install-time keys allowed in `tuning/platform.sysctl`.
 /// These sit on the *dynamic* security blacklist (so workload annotations cannot
 /// flip them) but are legitimate, reviewed constants for Kubernetes networking.
-const PLATFORM_INSTALL_KEYS: &[&str] = &[
-    "net.ipv4.ip_forward",
-    "net.ipv6.conf.all.forwarding",
-];
+const PLATFORM_INSTALL_KEYS: &[&str] = &["net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding"];
 
 /// Guard the platform profile: only the explicit install allowlist, nothing else.
 /// Prevents a bad edit of `tuning/platform.sysctl` from landing privileged knobs.
@@ -416,8 +421,8 @@ pub fn ensure_apply_consent(yes: bool, interactive: bool) -> Result<()> {
 
 /// Interactive confirm. Non-interactive sessions **require** an explicit `--yes`:
 /// silent host modification in scripts is a safety bug, not a convenience.
-fn confirm(prompt: &str, yes: bool) -> Result<bool> {
-    use std::io::{stdin, stdout, IsTerminal, Write};
+pub fn confirm(prompt: &str, yes: bool) -> Result<bool> {
+    use std::io::{IsTerminal, Write, stdin, stdout};
     if yes {
         return Ok(true);
     }
@@ -495,13 +500,15 @@ pub fn apply(yes: bool, dry_run: bool) -> Result<()> {
         let _ = fs::remove_file(LEGACY_SYSCTL_PATH);
     }
 
-    reload_sysctl();
+    if let Err(e) = reload_sysctl() {
+        spinner.fail(&format!(
+            "profile files written but reload failed: {e:#} — values may not be live"
+        ));
+        return Err(e.context(
+            "performance profile written but not reloaded; fix sysctl and re-run `ami tune apply`",
+        ));
+    }
     spinner.success("Performance profile applied (sysctl + limits)");
-
-    Ui::next_steps(
-        "Verify:",
-        &["ami tune status", "sysctl net.ipv4.tcp_congestion_control"],
-    );
     Ok(())
 }
 
@@ -516,7 +523,10 @@ pub fn rollback(yes: bool) -> Result<()> {
         && !Path::new(TUNE_SYSCTL_PATH).exists()
         && !Path::new(TUNE_LIMITS_PATH).exists()
     {
-        Ui::step_done("Nothing to roll back (performance profile never applied)", None);
+        Ui::step_done(
+            "Nothing to roll back (performance profile never applied)",
+            None,
+        );
         return Ok(());
     }
 
@@ -532,10 +542,24 @@ pub fn rollback(yes: bool) -> Result<()> {
     let baseline = TuneBaseline::load(Path::new(BASELINE_PATH))?;
     let spinner = Ui::spinner("Restoring baseline sysctl values...");
     let mut restored = 0usize;
+    let mut failed: Vec<String> = Vec::new();
     for (key, val) in &baseline.sysctl {
-        if write_sysctl_live(key, val).is_ok() {
-            restored += 1;
+        match write_sysctl_live(key, val) {
+            Ok(()) => restored += 1,
+            Err(e) => failed.push(format!("{key}: {e:#}")),
         }
+    }
+    // Partial restore must not claim success and must keep the drop-in files
+    // so the operator can retry.
+    if !failed.is_empty() {
+        spinner.fail(&format!(
+            "restored {restored} key(s), {} failed",
+            failed.len()
+        ));
+        bail!(
+            "rollback incomplete — drop-ins kept for retry:\n  {}",
+            failed.join("\n  ")
+        );
     }
     spinner.success(&format!("Restored {} sysctl key(s)", restored));
 
@@ -549,7 +573,7 @@ pub fn rollback(yes: bool) -> Result<()> {
         Ui::step_done(&format!("Removed {}", TUNE_LIMITS_PATH), None);
     }
 
-    reload_sysctl();
+    reload_sysctl().context("baseline restored but `sysctl --system` reload failed")?;
     Ui::step_done("Performance profile rolled back", None);
     Ok(())
 }
@@ -575,6 +599,14 @@ pub fn print_plan(changes: &[PlannedChange], layer: &str) {
             c.key,
             cur,
             Palette::green(&c.target)
+        );
+    }
+    // rp_filter relaxes reverse-path (anti-spoofing) checks — deliberate for
+    // multi-homing/WireGuard, but security-relevant on a public-IP node.
+    if changes.iter().any(|c| c.key.contains("rp_filter")) {
+        println!(
+            "  {} rp_filter is relaxed (anti-spoofing off) — intentional for WireGuard/multi-homing.",
+            Palette::yellow("!")
         );
     }
     println!();
@@ -641,31 +673,44 @@ mod tests {
     #[test]
     fn test_baseline_roundtrip() {
         let mut b = TuneBaseline::default();
-        b.sysctl
-            .insert("vm.swappiness".into(), "60".into());
+        b.sysctl.insert("vm.swappiness".into(), "60".into());
         let dir = std::env::temp_dir().join("amiterra-tune-test");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("baseline.yaml");
         b.save(&path).unwrap();
         let loaded = TuneBaseline::load(&path).unwrap();
-        assert_eq!(loaded.sysctl.get("vm.swappiness").map(String::as_str), Some("60"));
+        assert_eq!(
+            loaded.sysctl.get("vm.swappiness").map(String::as_str),
+            Some("60")
+        );
     }
 
     #[test]
     fn test_raw_embedded_files_are_written_verbatim() {
         // Host drop-ins must be byte-identical to published sources (docs include).
         assert_eq!(PlatformPrep.raw(), profile::PLATFORM_SYSCTL_TEXT);
-        assert_eq!(PerformanceProfile.raw_sysctl(), profile::PERFORMANCE_SYSCTL_TEXT);
+        assert_eq!(
+            PerformanceProfile.raw_sysctl(),
+            profile::PERFORMANCE_SYSCTL_TEXT
+        );
         assert_eq!(PerformanceProfile.limits(), profile::LIMITS_TEXT);
         assert!(PlatformPrep.raw().contains("WARNING"));
-        assert!(PerformanceProfile.raw_sysctl().contains("tuning/performance.sysctl"));
+        assert!(
+            PerformanceProfile
+                .raw_sysctl()
+                .contains("tuning/performance.sysctl")
+        );
     }
 
     #[test]
     fn test_platform_profile_matches_install_allowlist() {
         validate_platform_profile(&PlatformPrep).expect("current platform profile must be valid");
         let keys: Vec<String> = PlatformPrep.sysctl().into_iter().map(|e| e.key).collect();
-        assert_eq!(keys.len(), PLATFORM_INSTALL_KEYS.len(), "no extra platform keys");
+        assert_eq!(
+            keys.len(),
+            PLATFORM_INSTALL_KEYS.len(),
+            "no extra platform keys"
+        );
     }
 
     #[test]
@@ -685,8 +730,14 @@ mod tests {
     #[test]
     fn test_confirm_requires_yes_when_non_interactive() {
         // Safety regression: non-TTY without --yes must refuse.
-        assert!(ensure_apply_consent(true, false).is_ok(), "--yes overrides non-TTY");
-        assert!(ensure_apply_consent(false, true).is_ok(), "interactive prompts");
+        assert!(
+            ensure_apply_consent(true, false).is_ok(),
+            "--yes overrides non-TTY"
+        );
+        assert!(
+            ensure_apply_consent(false, true).is_ok(),
+            "interactive prompts"
+        );
         let err = ensure_apply_consent(false, false).unwrap_err();
         assert!(err.to_string().contains("--yes"), "got: {err}");
         assert!(err.to_string().contains("tuning"), "should point at docs");
@@ -696,7 +747,11 @@ mod tests {
     fn test_performance_profile_key_count_is_stable() {
         // Drift guard: 19 performance keys published in tuning/performance.sysctl.
         let keys = PerformanceProfile.sysctl();
-        assert_eq!(keys.len(), 19, "performance profile key count changed — update docs + this test");
+        assert_eq!(
+            keys.len(),
+            19,
+            "performance profile key count changed — update docs + this test"
+        );
     }
 
     #[test]
@@ -735,7 +790,7 @@ mod tests {
         } else {
             assert!(!sysctl_reload_supported());
             // Must not spawn `sysctl --system` (would print "illegal option -- -").
-            reload_sysctl();
+            reload_sysctl().unwrap();
         }
     }
 }

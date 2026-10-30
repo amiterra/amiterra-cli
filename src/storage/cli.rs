@@ -1,9 +1,9 @@
-//! CLI surface: `ami storage …` (Design Doc 0019).
+//! CLI surface: `ami storage …`.
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use super::{classify, ensure_data_root, inventory::StorageInventory, plan, prepare, DATA_ROOT};
+use super::{DATA_ROOT, classify, ensure_data_root, inventory::StorageInventory, plan, prepare};
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct StorageArgs {
@@ -27,7 +27,8 @@ pub enum StorageCommand {
         #[arg(long)]
         full: bool,
     },
-    /// Create LVM VG on an unallocated disk (opt-in, destructive on that disk only)
+    /// Prepare a dedicated data disk: LVM volume + filesystem + mount at the
+    /// data root (opt-in; destructive only to the selected unallocated disk)
     Prepare {
         /// Whole-disk name (e.g. nvme2n1) — must be unallocated/unmounted
         #[arg(long)]
@@ -42,7 +43,7 @@ pub enum StorageCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Remove empty VG created by prepare (requires --yes)
+    /// Undo prepare: unmount, drop fstab entry, remove the data LV and VG (requires --yes)
     Rollback {
         #[arg(long, default_value = prepare::DEFAULT_VG)]
         vg: String,
@@ -58,7 +59,10 @@ pub(crate) fn format_bytes(v: Option<u64>) -> String {
 }
 
 pub fn handle_storage(args: StorageArgs) -> Result<()> {
-    match args.command.unwrap_or(StorageCommand::Status { json: false }) {
+    match args
+        .command
+        .unwrap_or(StorageCommand::Status { json: false })
+    {
         StorageCommand::Status { json } => {
             let inv = StorageInventory::probe().unwrap_or_default();
             let summary = classify(&inv);
@@ -76,6 +80,18 @@ pub fn handle_storage(args: StorageArgs) -> Result<()> {
             println!("  Data root       : {DATA_ROOT}");
             println!("  Local SC        : {}", super::LOCAL_SC_NAME);
             println!("  Policy          : {}", summary.policy_label());
+            let vg_ready = prepare::dedicated_vg_present(prepare::DEFAULT_VG);
+            println!(
+                "  Dedicated VG    : {}",
+                if vg_ready {
+                    crate::ui::Palette::green(&format!(
+                        "{} present — s1 path ready",
+                        prepare::DEFAULT_VG
+                    ))
+                } else {
+                    crate::ui::Palette::dim(&format!("{} absent", prepare::DEFAULT_VG))
+                }
+            );
             println!(
                 "  Free disks      : {}",
                 if summary.free_disk_names.is_empty() {
@@ -106,7 +122,10 @@ pub fn handle_storage(args: StorageArgs) -> Result<()> {
                 return Ok(());
             }
             // Text mode: compact facts (same as slim JSON).
-            crate::ui::Ui::header("Storage Plan", "Machine-readable facts (no recommendations)");
+            crate::ui::Ui::header(
+                "Storage Plan",
+                "Machine-readable facts (no recommendations)",
+            );
             println!("  tier             : {}", doc.tier);
             println!("  storage_class    : {}", doc.storage_class);
             println!("  policy           : {}", doc.policy.join(","));
@@ -155,17 +174,27 @@ pub fn handle_storage(args: StorageArgs) -> Result<()> {
                     doc.node_profile.free_disks.join(", ")
                 }
             );
-            println!("  constraints      : {}", doc.constraints.join(","));
+            println!("  forbidden        : {}", doc.forbidden.join(","));
+            println!("  order_guide      : {}", doc.order_guide.join(" | "));
+            println!("  improve_guide    : {}", doc.improve_guide.join(" | "));
             if let Some(i) = &doc.inventory {
-                println!("  inventory        : {} device(s) [--full]", i.devices.len());
+                println!(
+                    "  inventory        : {} device(s) [--full]",
+                    i.devices.len()
+                );
             }
             println!();
             Ok(())
         }
-        StorageCommand::Prepare { disk, vg, yes, dry_run } => {
+        StorageCommand::Prepare {
+            disk,
+            vg,
+            yes,
+            dry_run,
+        } => {
             let inv = StorageInventory::probe().unwrap_or_default();
             let plan = prepare::plan_prepare(&inv, &disk, &vg)?;
-            crate::ui::Ui::header("Storage Prepare", "Create LVM VG on unallocated disk");
+            crate::ui::Ui::header("Storage Prepare", "Dedicated data disk (LVM + mount)");
             println!("  Disk: /dev/{}", plan.disk);
             println!("  VG  : {}", plan.vg_name);
             println!("  Planned:");
@@ -189,9 +218,22 @@ pub fn handle_storage(args: StorageArgs) -> Result<()> {
                 );
             }
             prepare::execute_prepare(&plan, false, true)?;
+            let done = prepare::activate_data_root(&plan.vg_name, false)?;
+            // Tier labels refresh in the same run (no "next init" lag).
+            super::refresh_node_labels();
             crate::ui::Ui::step_done(
-                &format!("VG {} ready — tier moves to s1 after first PVC", plan.vg_name),
+                &format!(
+                    "Dedicated data volume ready ({} step(s)) — tier s1 on next status",
+                    done.len().max(1)
+                ),
                 None,
+            );
+            crate::ui::Ui::next_steps(
+                "Verify:",
+                &[
+                    "ami storage status          VG/LV readiness and tier",
+                    "ami storage status --json   Machine-readable summary",
+                ],
             );
             Ok(())
         }

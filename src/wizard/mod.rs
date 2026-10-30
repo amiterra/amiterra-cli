@@ -1,9 +1,10 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::io::{stdin, stdout, IsTerminal, Write};
+use std::io::{IsTerminal, Write, stdin, stdout};
 
 use crate::cli::InitArgs;
 use crate::discovery::{DiscoveryReport, HostTopology};
+use crate::features::{FeatureContext, FeatureRequest, StoragePlan};
 use crate::ui::{Palette, Ui};
 
 /// Target role of the node within the Kubernetes cluster.
@@ -65,6 +66,12 @@ pub struct ClusterNodeConfig {
     /// Opt-in performance profile (`ami tune apply`) after install.
     #[serde(default)]
     pub apply_performance_tuning: bool,
+    /// Opt-in GitOps bootstrap (`ami gitops bootstrap`) after install.
+    #[serde(default)]
+    pub gitops_bootstrap: bool,
+    /// Dedicated data disk feature (skip / activate existing VG / prepare disk).
+    #[serde(default)]
+    pub storage: crate::features::StoragePlan,
 }
 
 /// Outcome of parsing the node-role menu input.
@@ -99,6 +106,27 @@ pub enum TuningChoice {
     Invalid,
 }
 
+/// Outcome of parsing the storage-optimization menu input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StorageChoice {
+    Skip,
+    Apply,
+    Preview,
+    /// Unknown input — caller must re-prompt.
+    Invalid,
+}
+
+/// Pure parser for `prompt_storage` (unit-testable).
+/// Empty input = safe default (Skip). Never silently Apply.
+pub fn parse_storage_choice(raw: &str) -> StorageChoice {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "n" | "no" | "skip" => StorageChoice::Skip,
+        "2" | "y" | "yes" | "apply" | "prepare" => StorageChoice::Apply,
+        "3" | "p" | "plan" | "preview" => StorageChoice::Preview,
+        _ => StorageChoice::Invalid,
+    }
+}
+
 /// Pure parser for `prompt_performance_tuning` (unit-testable).
 /// Empty input = safe default (Skip). Never silently Apply.
 pub fn parse_tuning_choice(raw: &str) -> TuningChoice {
@@ -110,7 +138,63 @@ pub fn parse_tuning_choice(raw: &str) -> TuningChoice {
     }
 }
 
+/// Outcome of parsing the GitOps bootstrap menu input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GitopsChoice {
+    Skip,
+    Apply,
+    Preview,
+    /// Unknown input — caller must re-prompt.
+    Invalid,
+}
+
+/// Pure parser for `prompt_gitops_bootstrap` (unit-testable).
+/// Empty input = safe default (Skip). Never silently Bootstrap.
+pub fn parse_gitops_choice(raw: &str) -> GitopsChoice {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "n" | "no" | "skip" => GitopsChoice::Skip,
+        "2" | "y" | "yes" | "apply" | "bootstrap" => GitopsChoice::Apply,
+        "3" | "p" | "plan" | "preview" => GitopsChoice::Preview,
+        _ => GitopsChoice::Invalid,
+    }
+}
+
 pub struct TerminalWizard;
+
+/// Announce a storage layer that has nothing to act on (no free disks, no
+/// existing VG) exactly where its prompt would appear — a silent skip is an
+/// answer the operator cannot see. Never fires for an explicit
+/// `--storage-disk` (that path validates the name and errors instead).
+fn note_storage_na(req: &FeatureRequest, ctx: &FeatureContext) {
+    if req.storage_disk.is_none() && ctx.server && !ctx.vg_present && ctx.free_disks.is_empty() {
+        Ui::step_info(
+            "Storage",
+            "Optimization skipped — no unallocated disks on this node (tier s0)",
+        );
+    }
+}
+
+/// [`crate::features::FeaturePrompts`] backed by terminal dialogs. Feature
+/// resolution stays in `features::plan_features`; this struct only collects
+/// answers for what is still undecided.
+struct WizardPrompts {
+    node_ip: String,
+}
+
+impl crate::features::FeaturePrompts for WizardPrompts {
+    fn storage(&mut self, ctx: &crate::features::FeatureContext) -> Result<StoragePlan> {
+        TerminalWizard::prompt_storage(ctx)
+    }
+    fn disk(&mut self, candidates: &[String]) -> Result<String> {
+        TerminalWizard::prompt_disk_choice(candidates)
+    }
+    fn tune(&mut self) -> Result<bool> {
+        TerminalWizard::prompt_performance_tuning()
+    }
+    fn gitops(&mut self) -> Result<bool> {
+        TerminalWizard::prompt_gitops_bootstrap(&self.node_ip)
+    }
+}
 
 impl TerminalWizard {
     /// Runs the Scenario B terminal wizard. If `args.yes` is provided or standard input
@@ -127,19 +211,53 @@ impl TerminalWizard {
             })?),
         };
 
-        // Render Scenario B Discovery Card (Design Doc 0014 format)
+        // Render the discovery card
         Self::render_discovery_card(report);
 
-        // If headless or auto-confirm flag is passed, construct directly from smart defaults
+        // If headless or auto-confirm flag is passed, no prompts run: flags and
+        // `--all-features` decide, everything else stays off (safe defaults).
         if args.yes || !stdin().is_terminal() {
             let role = cli_role.unwrap_or(NodeRole::ControlPlaneInit);
-            crate::ui::Ui::step_info("Auto-confirming", "Using verified defaults (non-interactive session)");
-            return Ok(Self::build_default_config(
-                report,
-                role,
-                args,
-                args.server_url.as_deref(),
-            ));
+            crate::ui::Ui::step_info(
+                "Auto-confirming",
+                "Using verified defaults (non-interactive session)",
+            );
+            let mut config =
+                Self::build_default_config(report, role, args, args.server_url.as_deref());
+            let req = FeatureRequest {
+                all_features: args.all_features,
+                storage_disk: args.storage_disk.clone(),
+                tune_apply: args.tune_apply,
+                gitops_bootstrap: args.gitops_bootstrap,
+            };
+            let inv = crate::storage::StorageInventory::probe().unwrap_or_default();
+            let ctx = FeatureContext {
+                cluster_init: role == NodeRole::ControlPlaneInit,
+                server: true,
+                free_disks: inv.free_disks().iter().map(|d| d.name.clone()).collect(),
+                vg_present: crate::storage::prepare::dedicated_vg_present(
+                    crate::storage::prepare::DEFAULT_VG,
+                ),
+                interactive: false,
+            };
+            let mut prompts = WizardPrompts {
+                node_ip: config.node_ip.clone(),
+            };
+            // Printed before the prompt sequence so the note lands exactly
+            // where the storage question would have been (storage → tune → gitops).
+            note_storage_na(&req, &ctx);
+            let plan = crate::features::plan_features(&req, &ctx, &mut prompts)?;
+            config.apply_performance_tuning = plan.tune.enabled;
+            config.gitops_bootstrap = plan.gitops.enabled;
+            config.storage = plan.storage;
+            if req.gitops_bootstrap && role != NodeRole::ControlPlaneInit {
+                config.gitops_bootstrap = false;
+                Ui::step_warn(
+                    "GitOps bootstrap ignored: only the control-plane-init node may bind \
+                     the cluster Git repository",
+                );
+            }
+            return Ok(config);
         }
 
         // 1. Role Selection & Confirmation (One-touch UX)
@@ -187,15 +305,48 @@ impl TerminalWizard {
         let mut config = Self::build_default_config(report, role, args, server_url.as_deref());
         config.server_url = server_url;
         config.cluster_token = cluster_token;
-        config.apply_performance_tuning = args.tune_apply;
 
         if customize {
             Self::prompt_customization(report, &mut config)?;
         }
 
-        // Tuning is a first-class optional step — never implicit.
-        if !args.tune_apply && !args.yes {
-            config.apply_performance_tuning = Self::prompt_performance_tuning()?;
+        // Optional feature layers — one resolution pipeline (flags beat
+        // prompts; `--yes` keeps everything off; `--all-features` turns all
+        // applicable layers on). Prompts run only for what is undecided.
+        let req = FeatureRequest {
+            all_features: args.all_features,
+            storage_disk: args.storage_disk.clone(),
+            tune_apply: args.tune_apply,
+            gitops_bootstrap: args.gitops_bootstrap,
+        };
+        let inv = crate::storage::StorageInventory::probe().unwrap_or_default();
+        let ctx = FeatureContext {
+            cluster_init: role == NodeRole::ControlPlaneInit,
+            server: true,
+            free_disks: inv.free_disks().iter().map(|d| d.name.clone()).collect(),
+            vg_present: crate::storage::prepare::dedicated_vg_present(
+                crate::storage::prepare::DEFAULT_VG,
+            ),
+            interactive: !args.yes,
+        };
+        let mut prompts = WizardPrompts {
+            node_ip: config.node_ip.clone(),
+        };
+        // Printed before the prompt sequence so the note lands exactly
+        // where the storage question would have been (storage → tune → gitops).
+        note_storage_na(&req, &ctx);
+        let plan = crate::features::plan_features(&req, &ctx, &mut prompts)?;
+        config.apply_performance_tuning = plan.tune.enabled;
+        config.gitops_bootstrap = plan.gitops.enabled;
+        config.storage = plan.storage;
+
+        // C1: joining nodes must never rebind the cluster's Flux repository.
+        if req.gitops_bootstrap && role != NodeRole::ControlPlaneInit {
+            config.gitops_bootstrap = false;
+            Ui::step_warn(
+                "GitOps bootstrap ignored: only the control-plane-init node may bind \
+                 the cluster Git repository (run `ami gitops bootstrap` there)",
+            );
         }
 
         Ok(config)
@@ -212,7 +363,8 @@ impl TerminalWizard {
         let mut auto_node_ip = None;
         if let Some(s_url) = server_url.or(args.server_url.as_deref())
             && let Some(target_host) = crate::discovery::network::extract_host_from_url(s_url)
-            && let Some((_iface, src_ip)) = crate::discovery::network::find_route_to_target(&target_host)
+            && let Some((_iface, src_ip)) =
+                crate::discovery::network::find_route_to_target(&target_host)
         {
             auto_node_ip = Some(src_ip);
         }
@@ -255,10 +407,12 @@ impl TerminalWizard {
             pod_cidr,
             service_cidr,
             tls_sans,
+            storage: StoragePlan::Skip,
             server_url: args.server_url.clone(),
             cluster_token: args.token.clone(),
             isolate_control_plane: args.isolate_control_plane,
             apply_performance_tuning: args.tune_apply,
+            gitops_bootstrap: args.gitops_bootstrap,
         }
     }
 
@@ -279,7 +433,10 @@ impl TerminalWizard {
         items.push(("Network Topology", topo_label.to_string()));
 
         let node_ip_detail = match &report.topology {
-            HostTopology::SinglePublicIp { interface, public_ip } => {
+            HostTopology::SinglePublicIp {
+                interface,
+                public_ip,
+            } => {
                 format!("{} ({})", public_ip, interface)
             }
             HostTopology::MultiNic {
@@ -302,7 +459,10 @@ impl TerminalWizard {
         if let Some(ext) = report.topology.primary_external_ip()
             && ext != report.topology.primary_node_ip()
         {
-            items.push(("External Ingress IP", format!("{} (Egress auto-detected)", ext)));
+            items.push((
+                "External Ingress IP",
+                format!("{} (Egress auto-detected)", ext),
+            ));
         }
 
         let wg_label = if report.topology.is_wireguard_required() {
@@ -331,10 +491,7 @@ impl TerminalWizard {
         };
         items.push(("TLS SANs", sans_preview));
 
-        let item_refs: Vec<(&str, &str)> = items
-            .iter()
-            .map(|(k, v)| (*k, v.as_str()))
-            .collect();
+        let item_refs: Vec<(&str, &str)> = items.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
         Ui::card("Amiterra Network Auto-Discovery", &item_refs);
     }
@@ -384,6 +541,157 @@ impl TerminalWizard {
         }
     }
 
+    /// Optional storage-optimization step (dedicated LVM data disk).
+    /// Safe default is **skip**. Returns the chosen plan.
+    fn prompt_storage(ctx: &FeatureContext) -> Result<StoragePlan> {
+        println!("\n  ── Storage Optimization (optional) ────────────────────────");
+        println!(
+            "     {} Moves stateful data to a dedicated disk (tier s1, I/O isolation).",
+            Palette::dim("Destructive only to the disk you select — system RAID is never touched.")
+        );
+        if ctx.vg_present {
+            println!(
+                "     {} Dedicated VG already present — activation only (no new disk).",
+                Palette::dim("Re-run detected:")
+            );
+        } else {
+            println!(
+                "     {} Free disks: {}",
+                Palette::dim("Available:"),
+                if ctx.free_disks.is_empty() {
+                    "none (node stays on shared root, tier s0)".to_string()
+                } else {
+                    ctx.free_disks.join(", ")
+                }
+            );
+        }
+        println!(
+            "     {} Skip — safe default (shared root)",
+            Palette::bold("[1]")
+        );
+        println!(
+            "     {} {}",
+            Palette::bold("[2]"),
+            if ctx.vg_present {
+                "Activate dedicated disk now"
+            } else {
+                "Prepare dedicated disk now (LVM + mount)"
+            }
+        );
+        println!(
+            "     {} Preview only (`ami storage plan`)",
+            Palette::bold("[3]")
+        );
+        println!();
+
+        loop {
+            print!(
+                "  {} Select [1-3, press Enter for 1 (Skip)]: ",
+                Palette::cyan("?")
+            );
+            stdout().flush()?;
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+            let raw = input.trim();
+
+            match parse_storage_choice(raw) {
+                StorageChoice::Apply => {
+                    if ctx.vg_present {
+                        Ui::step_done("Dedicated disk will be activated after install", None);
+                        return Ok(StoragePlan::Activate);
+                    }
+                    let disk = if ctx.free_disks.len() == 1 {
+                        let d = ctx.free_disks[0].clone();
+                        Ui::step_done(&format!("Selected disk: {d}"), None);
+                        d
+                    } else {
+                        Self::prompt_disk_choice(&ctx.free_disks)?
+                    };
+                    Ui::step_done("Dedicated disk will be prepared after install", None);
+                    return Ok(StoragePlan::Prepare(disk));
+                }
+                StorageChoice::Preview => {
+                    // Real preview (same contract as tune's Preview): show the
+                    // actual plan output, not a command hint.
+                    let inv = crate::storage::StorageInventory::probe().unwrap_or_default();
+                    let summary = crate::storage::classify(&inv);
+                    let doc = crate::storage::plan::build_plan(&inv, &summary, false);
+                    println!(
+                        "     {} tier={} · free disks: {}",
+                        Palette::dim("Storage plan:"),
+                        summary.tier.as_str(),
+                        if summary.free_disk_names.is_empty() {
+                            "none".to_string()
+                        } else {
+                            summary.free_disk_names.join(", ")
+                        }
+                    );
+                    for step in &doc.improve_guide {
+                        println!(
+                            "       {} {}",
+                            Palette::cyan(crate::ui::Glyphs::CHEVRON),
+                            step
+                        );
+                    }
+                    println!("     (re-run the question — Enter = Skip, 2 = Apply now)");
+                    continue;
+                }
+                StorageChoice::Skip => {
+                    Ui::step_info(
+                        "Storage",
+                        "Skipped — run `sudo ami storage prepare --disk <disk>` when ready.",
+                    );
+                    return Ok(StoragePlan::Skip);
+                }
+                StorageChoice::Invalid => {
+                    Ui::step_warn(&format!(
+                        "Invalid selection '{raw}'. Enter 1 (Skip), 2 (Apply), 3 (Preview), or press Enter for Skip."
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Disk picker for multiple candidates (feature already ON; this collects
+    /// the *parameter*, it does not re-decide the feature).
+    fn prompt_disk_choice(candidates: &[String]) -> Result<String> {
+        if candidates.is_empty() {
+            bail!("no free disks available for storage prepare");
+        }
+        println!("\n  Available unallocated disks:");
+        for (idx, name) in candidates.iter().enumerate() {
+            let label = format!("[{}]", idx + 1);
+            println!("     {} {}", Palette::bold(&label), name);
+        }
+        loop {
+            print!(
+                "  {} Select disk [1-{}, q=cancel]: ",
+                Palette::cyan("?"),
+                candidates.len()
+            );
+            stdout().flush()?;
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+            let raw = input.trim();
+            if matches!(raw, "q" | "Q" | "quit" | "cancel") {
+                bail!("storage preparation cancelled — nothing was modified");
+            }
+            match raw.parse::<usize>() {
+                Ok(n) if (1..=candidates.len()).contains(&n) => {
+                    let d = candidates[n - 1].clone();
+                    Ui::step_done(&format!("Selected disk: {d}"), None);
+                    return Ok(d);
+                }
+                _ => {
+                    Ui::step_warn(&format!(
+                        "Invalid selection '{raw}'. Enter 1-{}, or q to cancel.",
+                        candidates.len()
+                    ));
+                }
+            }
+        }
+    }
+
     /// Optional performance-tuning step. Safe default is **skip**.
     /// Returns true only when the operator explicitly opts in.
     fn prompt_performance_tuning() -> Result<bool> {
@@ -392,9 +700,18 @@ impl TerminalWizard {
         println!("\n  ── Performance Tuning (optional) ───────────────────────────");
         // Subsystem warning + source-of-truth docs (same contract as `ami tune apply`).
         crate::tune::print_tuning_scope_warning();
-        println!("     {} Skip — safe default, no host tuning", Palette::bold("[1]"));
-        println!("     {} Apply performance profile now", Palette::bold("[2]"));
-        println!("     {} Preview only (`ami tune plan`)", Palette::bold("[3]"));
+        println!(
+            "     {} Skip — safe default, no host tuning",
+            Palette::bold("[1]")
+        );
+        println!(
+            "     {} Apply performance profile now",
+            Palette::bold("[2]")
+        );
+        println!(
+            "     {} Preview only (`ami tune plan`)",
+            Palette::bold("[3]")
+        );
         println!();
 
         loop {
@@ -443,7 +760,77 @@ impl TerminalWizard {
         }
     }
 
-    fn prompt_customization(report: &DiscoveryReport, config: &mut ClusterNodeConfig) -> Result<()> {
+    /// Optional GitOps bootstrap step. Safe default is **skip**.
+    /// Returns true only when the operator explicitly opts in.
+    fn prompt_gitops_bootstrap(node_ip: &str) -> Result<bool> {
+        println!("\n  ── GitOps Bootstrap (optional) ─────────────────────────────");
+        println!(
+            "     {} Deploys Flux controllers and binds the cluster to a Git repository.",
+            Palette::dim("Infrastructure as Code, single source of truth.")
+        );
+        println!(
+            "     {} Skip — safe default, no GitOps on this node",
+            Palette::bold("[1]")
+        );
+        println!(
+            "     {} Bootstrap Flux + Git binding now",
+            Palette::bold("[2]")
+        );
+        println!(
+            "     {} Preview only (same output as `ami gitops bootstrap --dry-run`)",
+            Palette::bold("[3]")
+        );
+        println!();
+
+        loop {
+            print!(
+                "  {} Select [1-3, press Enter for 1 (Skip)]: ",
+                Palette::cyan("?")
+            );
+            stdout().flush()?;
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+            let raw = input.trim();
+
+            match parse_gitops_choice(raw) {
+                GitopsChoice::Apply => {
+                    Ui::step_done("GitOps bootstrap will run after install", None);
+                    return Ok(true);
+                }
+                GitopsChoice::Preview => {
+                    // M4: run the real dry-run plan (like tune's Preview runs `tune plan`),
+                    // with the detected node IP — no placeholder strings to copy-paste.
+                    let opts = crate::gitops::BootstrapOptions {
+                        node_ip: node_ip.to_string(),
+                        dry_run: true,
+                        ..Default::default()
+                    };
+                    if let Err(e) = crate::gitops::bootstrap(&opts) {
+                        Ui::step_warn(&format!("Preview failed: {e:#}"));
+                    }
+                    println!("     (re-run the question — Enter = Skip, 2 = Bootstrap now)");
+                    continue;
+                }
+                GitopsChoice::Skip => {
+                    Ui::step_info(
+                        "GitOps",
+                        "Skipped — run `sudo ami gitops bootstrap` when ready.",
+                    );
+                    return Ok(false);
+                }
+                GitopsChoice::Invalid => {
+                    Ui::step_warn(&format!(
+                        "Invalid selection '{raw}'. Enter 1 (Skip), 2 (Bootstrap), 3 (Preview), or press Enter for Skip."
+                    ));
+                }
+            }
+        }
+    }
+
+    fn prompt_customization(
+        report: &DiscoveryReport,
+        config: &mut ClusterNodeConfig,
+    ) -> Result<()> {
         println!("\n  ── Interactive Customization ──────────────────────────────");
 
         // 1. Interface selection
@@ -466,7 +853,11 @@ impl TerminalWizard {
                     Palette::dim(note)
                 );
             }
-            print!("  Select interface for cluster traffic [1-{}, press Enter to keep {}]: ", report.interfaces.len(), config.node_ip);
+            print!(
+                "  Select interface for cluster traffic [1-{}, press Enter to keep {}]: ",
+                report.interfaces.len(),
+                config.node_ip
+            );
             stdout().flush()?;
             let mut if_choice = String::new();
             stdin().read_line(&mut if_choice)?;
@@ -480,10 +871,9 @@ impl TerminalWizard {
                 Ui::step_done(&format!("Selected node-ip: {}", config.node_ip), None);
             } else {
                 // Do not silently keep the old value on garbage input.
-                Ui::step_warn(&format!(
-                    "Invalid interface selection '{raw}'. Keeping node-ip {}.",
-                    config.node_ip
-                ));
+                anyhow::bail!(
+                    "invalid interface selection '{raw}' — re-run `ami init` and pick a listed index"
+                );
             }
         }
 
@@ -493,11 +883,12 @@ impl TerminalWizard {
         let mut domain_input = String::new();
         stdin().read_line(&mut domain_input)?;
         let trimmed_domain = domain_input.trim();
-        if !trimmed_domain.is_empty()
-            && !config.tls_sans.contains(&trimmed_domain.to_string())
-        {
+        if !trimmed_domain.is_empty() && !config.tls_sans.contains(&trimmed_domain.to_string()) {
             config.tls_sans.push(trimmed_domain.to_string());
-            Ui::step_done(&format!("Added custom domain to TLS SANs: {}", trimmed_domain), None);
+            Ui::step_done(
+                &format!("Added custom domain to TLS SANs: {}", trimmed_domain),
+                None,
+            );
         }
 
         Ok(())
@@ -529,7 +920,8 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = TerminalWizard::build_default_config(&report, NodeRole::ControlPlaneInit, &args, None);
+        let cfg =
+            TerminalWizard::build_default_config(&report, NodeRole::ControlPlaneInit, &args, None);
         assert_eq!(cfg.role, NodeRole::ControlPlaneInit);
         assert_eq!(cfg.node_ip, "95.217.142.10");
         assert_eq!(cfg.node_external_ip, Some("95.217.142.10".to_string()));
@@ -588,9 +980,18 @@ mod tests {
 
     #[test]
     fn test_parse_role_choice_accepts_valid_and_rejects_garbage() {
-        assert_eq!(parse_role_choice(""), RoleChoice::Role(NodeRole::ControlPlaneInit));
-        assert_eq!(parse_role_choice("1"), RoleChoice::Role(NodeRole::ControlPlaneInit));
-        assert_eq!(parse_role_choice("2"), RoleChoice::Role(NodeRole::ControlPlane));
+        assert_eq!(
+            parse_role_choice(""),
+            RoleChoice::Role(NodeRole::ControlPlaneInit)
+        );
+        assert_eq!(
+            parse_role_choice("1"),
+            RoleChoice::Role(NodeRole::ControlPlaneInit)
+        );
+        assert_eq!(
+            parse_role_choice("2"),
+            RoleChoice::Role(NodeRole::ControlPlane)
+        );
         assert_eq!(parse_role_choice("3"), RoleChoice::Role(NodeRole::Worker));
         assert_eq!(parse_role_choice("C"), RoleChoice::Custom);
         assert_eq!(parse_role_choice("q"), RoleChoice::Quit);
@@ -612,6 +1013,31 @@ mod tests {
         assert_eq!(parse_tuning_choice("4"), TuningChoice::Invalid);
         assert_eq!(parse_tuning_choice("maybe"), TuningChoice::Invalid);
         assert_eq!(parse_tuning_choice("22"), TuningChoice::Invalid);
+    }
+
+    #[test]
+    fn test_parse_gitops_choice_never_silently_bootstraps() {
+        assert_eq!(parse_gitops_choice(""), GitopsChoice::Skip);
+        assert_eq!(parse_gitops_choice("1"), GitopsChoice::Skip);
+        assert_eq!(parse_gitops_choice("2"), GitopsChoice::Apply);
+        assert_eq!(parse_gitops_choice("bootstrap"), GitopsChoice::Apply);
+        assert_eq!(parse_gitops_choice("3"), GitopsChoice::Preview);
+        // Regression: garbage must NOT become Bootstrap.
+        assert_eq!(parse_gitops_choice("4"), GitopsChoice::Invalid);
+        assert_eq!(parse_gitops_choice("maybe"), GitopsChoice::Invalid);
+        assert_eq!(parse_gitops_choice("22"), GitopsChoice::Invalid);
+    }
+
+    #[test]
+    fn test_parse_storage_choice_never_silently_prepares() {
+        assert_eq!(parse_storage_choice(""), StorageChoice::Skip);
+        assert_eq!(parse_storage_choice("1"), StorageChoice::Skip);
+        assert_eq!(parse_storage_choice("2"), StorageChoice::Apply);
+        assert_eq!(parse_storage_choice("prepare"), StorageChoice::Apply);
+        assert_eq!(parse_storage_choice("3"), StorageChoice::Preview);
+        // Regression: garbage must NOT become Apply.
+        assert_eq!(parse_storage_choice("4"), StorageChoice::Invalid);
+        assert_eq!(parse_storage_choice("maybe"), StorageChoice::Invalid);
     }
 
     #[test]

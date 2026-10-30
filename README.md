@@ -5,6 +5,10 @@
 
 **Amiterra** (`ami`) is a single-binary, high-performance engine for autonomous private clouds, bare-metal servers, and edge nodes. Written in Rust, it delivers zero-touch Kubernetes clustering, Cilium eBPF host-routing, and workload-driven host kernel tuning.
 
+**Documentation:** start at [`docs/public/`](docs/public/) — [Quickstart](docs/public/modules/ROOT/pages/quickstart.adoc), [Safety & Reversibility](docs/public/modules/ROOT/pages/safety.adoc), [Command Reference](docs/public/modules/ROOT/pages/commands.adoc), [FAQ](docs/public/modules/ROOT/pages/faq.adoc).
+
+**Safe by default:** optional layers (performance tuning, GitOps) are opt-in and reversible; join tokens are never printed in install output; deploy keys are generated on the node and never leave it; dangerous kernel parameters are refused by guardrails. Details: [Safety & Reversibility](docs/public/modules/ROOT/pages/safety.adoc).
+
 ---
 
 ## ⚡ Quickstart
@@ -15,11 +19,14 @@ Install the single static binary and launch the guided setup:
 curl -fsSL https://get.amiterra.io | bash
 ```
 
-Or install non-interactively on a production server:
+Or install non-interactively:
 
 ```bash
-# Initialize Primary Control Plane
-sudo ami init --server -y
+# Initialize the first node (safe defaults: base install only)
+sudo ami init -y
+
+# Everything on: storage, tuning, GitOps (cluster-init node)
+sudo ami init -y --all-features --role control-plane-init
 
 # Join an existing cluster as an HA Control Plane
 sudo ami join https://<primary-ip>:6443 --token <token> --control-plane -y
@@ -27,6 +34,12 @@ sudo ami join https://<primary-ip>:6443 --token <token> --control-plane -y
 # Join an existing cluster as a Worker Node
 sudo ami join https://<primary-ip>:6443 --token <token> -y
 ```
+
+One unified flow: the interactive picker selects the target (production or
+sandbox) and every optional layer — storage, tuning, GitOps — asks first.
+`--yes` keeps optional layers off; `--all-features` (or per-layer flags like
+`--tune-apply`, `--gitops-bootstrap`, `--storage-disk <name>`) turns them on
+explicitly.
 
 ---
 
@@ -52,10 +65,16 @@ sudo ami join https://<primary-ip>:6443 --token <token> -y
 | :--- | :--- |
 | `ami init` | Initialize environment (Production Server or Local Dev Workstation) |
 | `ami join <url>` | Join an existing cluster as Control-Plane (`--control-plane`) or Worker |
-| `ami status` | Context-aware health and status of active cluster and tuner daemon |
-| `ami doctor` | System diagnostic inspection (Kernel, cgroups v2, eBPF BTF, BBR) |
-| `ami tune` | Inspect / apply / roll back host performance tuning (opt-in) |
-| `ami uninstall` | Cleanly remove components, revert sysctl kernel profiles, restore host state |
+| `ami up` / `ami down` | Start / stop node services or the local sandbox |
+| `ami status` | Context-aware health of the active environment (`--json` for scripts) |
+| `ami doctor` | Preflight diagnostics (kernel, cgroups v2, eBPF BTF, BBR); alias `preflight` |
+| `ami tune` | Inspect / apply / roll back host performance tuning (opt-in, reversible) |
+| `ami gitops` | Bootstrap Flux + Git binding (`bootstrap`), live sync state (`status`) |
+| `ami join-command` | Print the full node-join command (reveals the cluster token on demand) |
+| `ami storage` | Storage tier inventory, Order/Improve plan, opt-in LVM prepare |
+| `ami uninstall` | Cleanly remove components, revert sysctl profiles, restore host state |
+
+Full reference: [`docs/public/`](docs/public/) — quickstart, safety model, and FAQ.
 
 ---
 

@@ -1,4 +1,4 @@
-//! Pure storage tier classification (Design Doc 0019).
+//! Pure storage tier classification.
 //!
 //! Input: [`StorageInventory`]. Output: tier + class + policy.
 //! No syscalls — fully unit-testable.
@@ -75,7 +75,7 @@ impl StoragePlanSummary {
 
 /// Derive tier/class/policy from inventory (pure).
 ///
-/// Rules (Design 0019 §2):
+/// Classification rules:
 /// 1. Free whole-disk → at least S1 path (prepare available); if any free disk
 ///    is non-rotational we still need `prepare` first → classify as S0 with
 ///    note `upgrade-ready` unless a dedicated data root already exists.
@@ -91,11 +91,7 @@ pub fn classify(inv: &StorageInventory) -> StoragePlanSummary {
     }
 
     let free: Vec<String> = inv.free_disks().iter().map(|d| d.name.clone()).collect();
-    let roots: Vec<String> = inv
-        .root_devices()
-        .iter()
-        .map(|d| d.name.clone())
-        .collect();
+    let roots: Vec<String> = inv.root_devices().iter().map(|d| d.name.clone()).collect();
 
     // Heuristic: dedicated data already in use if something other than root is
     // mounted under /var/lib/amiterra/data (Phase C refine).

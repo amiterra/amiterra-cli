@@ -1,4 +1,4 @@
-//! Universal storage tiers for stateful workloads (Design Doc 0019).
+//! Universal storage tiers for stateful workloads.
 //!
 //! Layers:
 //! - [`inventory`] — read-only host probe (block devices, LVM, mounts).
@@ -15,9 +15,9 @@ pub mod plan;
 pub mod prepare;
 pub mod profile;
 
-pub use classify::{classify, StorageClass, StoragePlanSummary, StorageTier};
+pub use classify::{StorageClass, StoragePlanSummary, StorageTier, classify};
 pub use inventory::{BlockDevice, RaidSet, StorageInventory};
-pub use profile::{build_node_profile, NodeStorageProfile};
+pub use profile::{NodeStorageProfile, build_node_profile};
 
 /// Data root convention for all stateful volumes (stable across tier upgrades).
 pub const DATA_ROOT: &str = "/var/lib/amiterra/data";
@@ -53,7 +53,7 @@ pub fn ensure_data_root(root: &std::path::Path) -> std::io::Result<Vec<std::path
 /// compatible (WaitForFirstConsumer) so tier upgrades can swap internals later.
 pub fn local_storageclass_yaml(data_root: &str) -> String {
     format!(
-        r#"# Amiterra Universal Storage (Design 0019)
+        r#"# Amiterra Universal Storage
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -63,7 +63,9 @@ metadata:
     {LABEL_CLASS}: shared-root
 provisioner: rancher.io/local-path
 volumeBindingMode: WaitForFirstConsumer
-reclaimPolicy: Delete
+# Retain (not Delete): stateful workloads on this class carry backup-required
+# policy — a deleted PVC must not silently wipe the underlying directory.
+reclaimPolicy: Retain
 parameters:
   path: {data_root}
 "#
@@ -71,12 +73,45 @@ parameters:
 }
 
 /// Node labels to apply after cluster start (printed + applied via kubectl when possible).
-pub fn node_labels(class: &classify::StorageClass, tier: &classify::StorageTier, policy: &str) -> Vec<(&'static str, String)> {
-    vec![
+///
+/// `storage-policy` is only meaningful on s0
+/// (`backup-required`); higher tiers must not carry a policy label.
+pub fn node_labels(
+    class: &classify::StorageClass,
+    tier: &classify::StorageTier,
+    policy: &str,
+) -> Vec<(&'static str, String)> {
+    let mut labels = vec![
         (LABEL_CLASS, class.as_str().to_string()),
         (LABEL_TIER, tier.as_str().to_string()),
-        (LABEL_POLICY, policy.to_string()),
-    ]
+    ];
+    if *tier == classify::StorageTier::S0 {
+        labels.push((LABEL_POLICY, policy.to_string()));
+    }
+    labels
+}
+
+/// Re-classify the host and push fresh tier labels to the node (best-effort).
+///
+/// Called after `storage prepare`/`activate` and at the end of `ami init`, so a
+/// tier change is visible in the same run instead of "on next init".
+pub fn refresh_node_labels() {
+    let inv = inventory::StorageInventory::probe().unwrap_or_default();
+    let summary = classify::classify(&inv);
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "localhost".into());
+    for (key, val) in node_labels(
+        &summary.storage_class,
+        &summary.tier,
+        &summary.policy_label(),
+    ) {
+        let arg = format!("{key}={val}");
+        let _ = std::process::Command::new("k3s")
+            .args(["kubectl", "label", "node", &hostname, &arg, "--overwrite"])
+            .output();
+    }
 }
 
 #[cfg(test)]
@@ -107,9 +142,20 @@ mod tests {
 
     #[test]
     fn node_labels_stable() {
-        let labels = node_labels(&StorageClass::SharedRoot, &StorageTier::S0, "backup-required");
+        let labels = node_labels(
+            &StorageClass::SharedRoot,
+            &StorageTier::S0,
+            "backup-required",
+        );
         assert_eq!(labels[0].1, "shared-root");
         assert_eq!(labels[1].1, "s0");
         assert_eq!(labels[2].1, "backup-required");
+    }
+
+    #[test]
+    fn node_labels_omit_policy_above_s0() {
+        let labels = node_labels(&StorageClass::LocalLvm, &StorageTier::S1, "none");
+        assert_eq!(labels.len(), 2, "storage-policy is s0-only");
+        assert!(labels.iter().all(|(k, _)| *k != LABEL_POLICY));
     }
 }

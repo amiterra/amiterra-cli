@@ -32,6 +32,23 @@ Do not change values without updating the docs and the tune unit tests.
 | File / inode capacity | `fs.file-max`, `fs.nr_open`, `inotify.*` | performance |
 | Process limits | `nofile` (limits.d) | performance |
 
+## Platform guidance
+
+* **Minimum RAM ≥ 4 GB** for production nodes running the full stack
+  (k3s + Cilium + Flux + stateful workloads). `vm.swappiness = 0` is
+  intentional for latency-sensitive data services: under memory pressure
+  the kernel prefers the OOM path over swap-out. On smaller instances this
+  raises OOM risk — size the node, do not weaken the profile silently.
+* **`rp_filter = 0`** relaxes reverse-path (anti-spoofing) checks. This is
+  intentional for WireGuard mesh / multi-homing / floating-IP topologies where
+  strict filtering drops legitimate tunnel traffic. Compensating controls:
+  WireGuard cryptokey routing (unknown peers dropped before any rp_filter
+  consideration) and host firewall (untouched by this pipeline). The tune
+  plan prints an explicit warning whenever rp_filter changes.
+* The profile tunes **stack behaviour and limits only** — never disk
+  schedulers, CPU governor, NUMA/hugepages or IRQ affinity. That keeps it
+  safe on virtual machines (virtio) as well as bare metal.
+
 ## CLI contract
 
 ```bash

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Amiterra QEMU Sandbox (single-node fidelity VM)
-# Production-like Ubuntu guest for `ami init --server` / `ami tune` testing.
+# Production-like Ubuntu guest for `ami init` / `ami tune` testing.
 # Reuses the CoW + cloud-init approach from cluster-vm.sh (multi-node e2e).
 # =============================================================================
 set -euo pipefail

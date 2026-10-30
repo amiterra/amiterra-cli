@@ -37,13 +37,23 @@ pub struct BlockDevice {
     #[serde(default, rename = "fsused", deserialize_with = "de_opt_u64")]
     pub fsused_bytes: Option<u64>,
     /// `AVAIL`/`FSAVAIL` from lsblk (bytes when `-b`).
-    #[serde(default, rename = "avail", alias = "fsavail", deserialize_with = "de_opt_u64")]
+    #[serde(
+        default,
+        rename = "avail",
+        alias = "fsavail",
+        deserialize_with = "de_opt_u64"
+    )]
     pub fsavail_bytes: Option<u64>,
     #[serde(default)]
     pub fstype: Option<String>,
-    /// All mountpoints (modern `mountpoints: []` + legacy `mountpoint`).
-    #[serde(default, rename = "mountpoints", alias = "mountpoint", deserialize_with = "de_mounts")]
+    /// All mountpoints (modern `mountpoints: []`).
+    #[serde(default, rename = "mountpoints", deserialize_with = "de_mounts")]
     pub mountpoints: Vec<String>,
+    /// Legacy single `mountpoint` (util-linux < 2.39). Merged into
+    /// [`Self::mountpoints`] after parse — one document may carry both keys,
+    /// which must not hard-fail serde as a duplicate field.
+    #[serde(default, rename = "mountpoint", skip_serializing)]
+    pub legacy_mountpoint: Option<String>,
     #[serde(default)]
     pub rota: Option<bool>,
     #[serde(default)]
@@ -67,7 +77,7 @@ where
         Some(other) => {
             return Err(serde::de::Error::custom(format!(
                 "invalid size value: {other}"
-            )))
+            )));
         }
     })
 }
@@ -122,7 +132,7 @@ where
             return Err(de::Error::invalid_value(
                 Unexpected::Other(&other.to_string()),
                 &"number or numeric string",
-            ))
+            ));
         }
     })
 }
@@ -211,7 +221,10 @@ impl BlockDevice {
         if self.is_rotational() {
             return "hdd";
         }
-        if self.name.starts_with("sd") || self.name.starts_with("vd") || self.name.starts_with("xvd") {
+        if self.name.starts_with("sd")
+            || self.name.starts_with("vd")
+            || self.name.starts_with("xvd")
+        {
             return "ssd";
         }
         if self.is_raid_or_md() {
@@ -261,6 +274,9 @@ impl RaidSet {
 impl StorageInventory {
     /// In-memory inventory for tests / offline classify.
     pub fn from_devices(devices: Vec<BlockDevice>) -> Self {
+        let mut devices = devices;
+        // Same normalization as probe(): merge legacy `mountpoint` keys.
+        normalize_devices(&mut devices);
         Self {
             devices,
             probe_ok: true,
@@ -378,7 +394,7 @@ impl StorageInventory {
             match serde_json::from_slice::<LsblkOut>(&out.stdout) {
                 Ok(parsed) => {
                     let mut devices = parsed.blockdevices.unwrap_or_default();
-                    normalize_sizes(&mut devices);
+                    normalize_devices(&mut devices);
                     if !notes.is_empty() {
                         notes.push(format!("lsblk succeeded with columns: {cols}"));
                     }
@@ -403,7 +419,7 @@ impl StorageInventory {
                 && let Ok(parsed) = serde_json::from_slice::<LsblkOut>(&out.stdout)
             {
                 let mut devices = parsed.blockdevices.unwrap_or_default();
-                normalize_sizes(&mut devices);
+                normalize_devices(&mut devices);
                 notes.push("lsblk succeeded with default columns".into());
                 return Ok(Self {
                     devices,
@@ -427,8 +443,19 @@ struct LsblkOut {
     blockdevices: Option<Vec<BlockDevice>>,
 }
 
-/// No-op hook kept for call sites; `size_bytes` is filled during deserialize.
-fn normalize_sizes(_devices: &mut [BlockDevice]) {}
+/// Post-parse normalization: size hook plus merge of the legacy singular
+/// `mountpoint` key into `mountpoints` (see [`BlockDevice::legacy_mountpoint`]).
+fn normalize_devices(devices: &mut [BlockDevice]) {
+    for d in devices.iter_mut() {
+        if let Some(m) = d.legacy_mountpoint.take()
+            && !m.trim().is_empty()
+            && !d.mountpoints.contains(&m)
+        {
+            d.mountpoints.push(m);
+        }
+        normalize_devices(&mut d.children);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -543,7 +570,7 @@ mod tests {
         ]}"#;
         let parsed: LsblkOut = serde_json::from_str(raw).unwrap();
         let mut devices = parsed.blockdevices.unwrap();
-        normalize_sizes(&mut devices);
+        normalize_devices(&mut devices);
         let inv = StorageInventory::from_devices(devices);
         assert_eq!(inv.free_disks().len(), 0);
         let root = inv.root_devices();
@@ -558,6 +585,22 @@ mod tests {
         let parsed: LsblkOut = serde_json::from_str(raw).unwrap();
         let devices = parsed.blockdevices.unwrap();
         assert_eq!(devices[0].fsavail_bytes, Some(12345));
+    }
+
+    #[test]
+    fn parse_dual_mountpoint_keys_merges() {
+        let raw = r#"{"blockdevices":[
+            {"name":"sda","type":"disk","fstype":"ext4","mountpoint":"/","mountpoints":["/","/boot"]}
+        ]}"#;
+        let parsed: LsblkOut = serde_json::from_str(raw).unwrap();
+        let mut devices = parsed.blockdevices.unwrap();
+        normalize_devices(&mut devices);
+        assert_eq!(
+            devices[0].mountpoints,
+            vec!["/".to_string(), "/boot".to_string()]
+        );
+        // legacy key is merged away, never duplicated
+        assert!(devices[0].legacy_mountpoint.is_none());
     }
 
     #[test]

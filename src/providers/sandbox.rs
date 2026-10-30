@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -91,8 +91,7 @@ impl ContainerK3sEngine {
             .output()
             .map(|o| {
                 let args_json = String::from_utf8_lossy(&o.stdout);
-                args_json.contains("--disable=traefik")
-                    && args_json.contains("--disable=servicelb")
+                args_json.contains("--disable=traefik") && args_json.contains("--disable=servicelb")
             })
             .unwrap_or(false)
     }
@@ -102,14 +101,32 @@ impl ContainerK3sEngine {
             if let Ok(out) = Command::new(self.runtime_bin)
                 .args(["exec", cluster_name, "cat", "/etc/rancher/k3s/k3s.yaml"])
                 .output()
-                && out.status.success() && !out.stdout.is_empty()
+                && out.status.success()
+                && !out.stdout.is_empty()
             {
-                fs::write(kubeconfig_path, &out.stdout)?;
+                // Kubeconfig carries the cluster-admin client key — 0600.
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(kubeconfig_path)?;
+                f.write_all(&out.stdout)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(kubeconfig_path, fs::Permissions::from_mode(0o600))?;
+                }
                 return Ok(());
             }
             sleep(Duration::from_secs(1));
         }
-        bail!("Timed out waiting for K3s kubeconfig from container '{}'", cluster_name);
+        bail!(
+            "Timed out waiting for K3s kubeconfig from container '{}'",
+            cluster_name
+        );
     }
 }
 
@@ -222,10 +239,16 @@ impl SandboxEngine for ContainerK3sEngine {
                     .output()?;
                 if !out.status.success() {
                     let err = String::from_utf8_lossy(&out.stderr);
-                    bail!("Failed to start existing container '{}': {}", cluster_name, err.trim());
+                    bail!(
+                        "Failed to start existing container '{}': {}",
+                        cluster_name,
+                        err.trim()
+                    );
                 }
             } else {
-                let api_map = format!("{}:6443", api_port);
+                // Loopback-only publish: the sandbox API must not be reachable
+                // from the LAN (it carries cluster-admin credentials).
+                let api_map = format!("127.0.0.1:{api_port}:6443");
                 let out = Command::new(self.runtime_bin)
                     .args([
                         "run",
@@ -378,9 +401,9 @@ impl SandboxEngine for QemuSandboxEngine {
         _api_port: u16,
         _kubeconfig_path: Option<&Path>,
     ) -> Result<()> {
-        let out = self.run("up").map_err(|e| {
-            anyhow::anyhow!("Failed to launch sandbox-vm.sh: {e}")
-        })?;
+        let out = self
+            .run("up")
+            .map_err(|e| anyhow::anyhow!("Failed to launch sandbox-vm.sh: {e}"))?;
         if !out.status.success() {
             bail!(
                 "QEMU sandbox failed to start: {}",
@@ -560,7 +583,8 @@ pub fn print_missing_engine_recommendations(next_command: &str) {
             "  • Rancher Desktop               : brew install --cask rancher".to_string(),
             "  • Podman Desktop                : brew install --cask podman-desktop".to_string(),
             "› CLI-Only Runtime:".to_string(),
-            "  • Colima + Docker CLI           : brew install colima docker && colima start".to_string(),
+            "  • Colima + Docker CLI           : brew install colima docker && colima start"
+                .to_string(),
         ]
     } else {
         vec![
@@ -579,7 +603,7 @@ pub fn print_missing_engine_recommendations(next_command: &str) {
         "No compatible container runtime or Kubernetes tool detected",
         why,
         &step_refs,
-        Some("https://docs.amiterra.io/workstation/prerequisites"),
+        Some("https://github.com/amiterra/amiterra-cli/tree/main/docs"),
     );
 
     let next_hint = format!("Run '{}' once a container runtime is ready.", next_command);

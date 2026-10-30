@@ -26,13 +26,14 @@ pub async fn probe_public_ip() -> Option<String> {
         match client.get(url).send().await {
             Ok(resp) => {
                 if resp.status().is_success()
-                    && let Ok(text) = resp.text().await {
-                        let ip = text.trim();
-                        // Validate basic IPv4 format
-                        if is_valid_ipv4(ip) {
-                            debug!("Discovered public IP: {}", ip);
-                            return Some(ip.to_string());
-                        }
+                    && let Ok(text) = resp.text().await
+                {
+                    let ip = text.trim();
+                    // Validate basic IPv4 format
+                    if is_valid_ipv4(ip) {
+                        debug!("Discovered public IP: {}", ip);
+                        return Some(ip.to_string());
+                    }
                 }
             }
             Err(e) => {

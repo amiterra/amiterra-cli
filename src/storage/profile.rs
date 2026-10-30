@@ -115,7 +115,10 @@ pub struct NodeStorageProfile {
 const SHARED_ROOT_STATEFUL_BUDGET_RATIO: u64 = 60; // percent of free
 
 /// Build node profile from inventory + tier classification (pure).
-pub fn build_node_profile(inv: &StorageInventory, summary: &StoragePlanSummary) -> NodeStorageProfile {
+pub fn build_node_profile(
+    inv: &StorageInventory,
+    summary: &StoragePlanSummary,
+) -> NodeStorageProfile {
     let empty = NodeStorageProfile {
         isolation: Isolation::SharedRoot,
         redundancy: Redundancy::None,

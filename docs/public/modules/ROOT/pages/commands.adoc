@@ -1,0 +1,211 @@
+= Command Reference
+:description: Every `ami` command group, its purpose, and key flags.
+:keywords: commands, reference, flags, CLI
+
+[.lead]
+`ami` is organized by lifecycle phase. Each command supports `--help`;
+reporting commands support `--json` for scripting.
+
+== `ami init`
+
+Initialize the environment. Interactive by default — one unified target picker
+(Production Server or local sandbox), then optional feature layers each ask
+first. Alias: `ami install`.
+
+[source,bash]
+----
+sudo ami init                        # guided (recommended)
+sudo ami init -y                     # non-interactive, safe defaults (base only)
+sudo ami init -y --all-features      # non-interactive, every applicable layer
+sudo ami init --dry-run              # preview, zero changes
+sudo ami init --role control-plane-init --node-ip 10.0.0.5 -y   # CI / scripts
+----
+
+Key flags:
+
+[cols="1,3"]
+|===
+|Flag |Description
+
+|`--role <role>`
+|`control-plane-init` \| `control-plane` \| `worker`. Presence of
+`--role`/`--token`/`--server-url` implies a production target.
+
+|`--node-ip`, `--node-external-ip`
+|Override network auto-detection
+
+|`--pod-cidr`, `--service-cidr`, `--tls-san`
+|Network and API certificate overrides
+
+|`--all-features`
+|Enable every *applicable* optional layer (storage, tuning, GitOps) without
+prompts. GitOps applies only on the cluster-init node.
+
+|`--storage-disk <name>`
+|Prepare a dedicated LVM data disk (e.g. `nvme2n1`); destructive to that disk
+only, never to system RAID
+
+|`--tune-apply`
+|Opt in to the performance profile
+
+|`--gitops-bootstrap`
+|Opt in to Flux + Git binding (cluster-init node only)
+
+|`-y`, `--yes`
+|Accept safe defaults without prompts. Optional layers stay **off** unless
+flagged — `--yes` never means "everything on".
+
+|`--dry-run`
+|Show the plan; change nothing
+|===
+
+== `ami join`
+
+Join an existing cluster.
+
+[source,bash]
+----
+sudo ami join https://<primary-ip>:6443 --token <token> -y
+sudo ami join https://<primary-ip>:6443 --token <token> --control-plane -y
+----
+
+Get the exact command (with token) from the first node: `ami join-command worker`
+or `ami join-command control-plane`. Supports the same feature flags as `init`
+(`--all-features`, `--storage-disk`, `--tune-apply`, `--gitops-bootstrap`) plus
+`--node-ip`, `--tls-san`, `--dry-run`. GitOps bootstrap is cluster-scoped and is
+skipped with a warning on join nodes.
+
+== `ami up` / `ami down`
+
+Start or stop the local environment (alias: `ami start` / `ami stop`). The
+active target is remembered from `init` — no mode flags to pass.
+
+== `ami status`
+
+Context-aware health of the active environment: k3s service, networking stack,
+tuner daemon, tuning profile, GitOps sync state (live, not cached), storage tier,
+and kernel counters.
+
+[source,bash]
+----
+ami status
+ami status --json | jq .
+----
+
+== `ami doctor`
+
+Diagnostics and preflight checks (alias: `ami preflight`). Read-only.
+
+[source,bash]
+----
+sudo ami doctor          # readiness (auto-detects server/workstation posture)
+sudo ami doctor --json   # machine-readable
+sudo ami doctor --storage  # storage inventory shortcut
+----
+
+== `ami tune`
+
+Guarded, reversible kernel tuning. The parameter sources live in the
+https://github.com/amiterra/amiterra-cli/tree/main/tuning[`tuning/`] directory
+of the repository and are embedded into the binary at build time.
+
+[source,bash]
+----
+ami tune plan       # preview changes (no writes)
+ami tune apply      # apply; captures baseline first, prints Verify hints
+ami tune rollback   # restore the baseline
+ami tune status     # what is applied right now
+ami tune platform   # re-apply minimal platform prep only
+----
+
+*Performance profile* covers TCP/BPF/ARP (`bbr`, `fq`, `somaxconn`), file
+capacity (`fs.file-max`, inotify), and `vm.swappiness`. It never touches
+firewall policy, panic policy, or disk schedulers. Values outside the policy
+envelope are refused. On multi-homing/WireGuard nodes `rp_filter` is relaxed —
+the plan prints an explicit warning when that happens.
+
+== `ami gitops`
+
+Opt-in GitOps bootstrap: local Git repository, read-only deploy key, Flux
+controllers (vendored and checksum-pinned), and the binding between them.
+
+[source,bash]
+----
+sudo ami gitops bootstrap --node-ip <node-ip>
+sudo ami gitops bootstrap --dry-run
+sudo ami gitops status
+sudo ami gitops status --json
+----
+
+* Idempotent: re-running converges and reports what already matches.
+* The private key is generated on the node and never leaves it; Flux gets
+  read-only access (`git-upload-pack` only).
+* `status` probes live Flux sync state from the cluster, not a cached file.
+* On `local-bare` the repository lives only on this node — `status` reminds you
+  until an external remote is connected.
+
+== `ami join-command`
+
+Print the full node-join command, including the cluster token.
+
+[source,bash]
+----
+ami join-command worker
+ami join-command control-plane
+ami join-command --json
+----
+
+The join token is a secret: it is never printed by `init`/`join`. This command
+is the explicit, auditable way to reveal it. Run it on the control-plane node.
+
+== `ami storage`
+
+Universal storage tiers for stateful workloads.
+
+[source,bash]
+----
+sudo ami storage status
+sudo ami storage plan                          # Order/Improve guide, read-only
+sudo ami storage prepare --disk nvme2n1        # opt-in: dedicated LVM disk (tier s1)
+sudo ami storage rollback --vg amiterra-data
+----
+
+`prepare` runs the full chain — LVM volume, filesystem, mount at the data root,
+tier labels — and is destructive *to the named disk only*. It requires `--yes`
+or an interactive confirmation. `plan` is always safe.
+
+== `ami uninstall`
+
+Remove Amiterra, stop clusters, and restore host state.
+
+[source,bash]
+----
+sudo ami uninstall
+sudo ami uninstall --purge   # also remove data directories and logs
+----
+
+Restores sysctl baselines, removes components and the Cilium datapath
+leftovers the k3s uninstaller does not know about (interfaces, netfilter
+chains, the `amiterra-git` account). The final line is **verified**: `ami`
+re-probes the host and only claims "Host state restored" when nothing is
+left. Without `--purge`, data directories are reported as *kept*, not as
+restored. Use `ami tune rollback` first if you only want to undo tuning.
+
+== Global conventions
+
+[cols="1,3"]
+|===
+|Convention |Description
+
+|`-y`, `--yes`
+|Skip interactive confirmation. Non-TTY sessions *require* it for mutations.
+
+|`--dry-run`
+|Show planned actions; perform none.
+
+|`--json`
+|Machine-readable output on reporting commands.
+
+|Exit codes
+|`0` success; non-zero on refusal or failure — safe to use in CI.
+|===

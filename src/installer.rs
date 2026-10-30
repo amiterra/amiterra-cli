@@ -1,27 +1,43 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::io::{self, Write};
 
-use crate::capabilities::{env_choices, HostCapabilities, InitTarget};
-use crate::cli::{
-    DownArgs, InitArgs, JoinArgs, StatusArgs, UninstallArgs, UpArgs,
-};
+use crate::capabilities::{HostCapabilities, InitTarget, env_choices};
+use crate::cli::{DownArgs, InitArgs, JoinArgs, StatusArgs, UninstallArgs, UpArgs};
 use crate::context::{EnvironmentMode, ExecutionContext};
 use crate::providers::resolve_backend;
 use crate::ui::{Glyphs, Palette, Ui};
 
 pub async fn handle_init(args: InitArgs) -> Result<()> {
-    // Fast paths from explicit flags (CI / scripts). Interactive path is the
-    // single unified wizard — same questions, capability-gated choices.
-    let (mode, sandbox_engine) = if args.server
-        || args.role.is_some()
+    // Target resolution — one unified flow, no mode flags:
+    // 1. Join-signals (--role / --server-url / --token) always mean a production
+    //    server node.
+    // 2. Interactive → the single capability-gated picker.
+    // 3. `-y` → the picker's own recommended default (same source of truth).
+    let (mode, sandbox_engine) = if args.role.is_some()
         || args.server_url.is_some()
         || args.token.is_some()
     {
         (EnvironmentMode::Server, None)
-    } else if args.dev {
-        (EnvironmentMode::Workstation, Some("container".to_string()))
     } else if args.yes {
-        (EnvironmentMode::Workstation, None)
+        let caps = HostCapabilities::probe();
+        let choices = env_choices(&caps);
+        let rec = choices
+            .iter()
+            .find(|c| c.available && c.recommended)
+            .or_else(|| choices.iter().find(|c| c.available));
+        match rec {
+            Some(c) => {
+                Ui::step_info(
+                    "Target",
+                    &format!("{} (non-interactive default)", c.target.title()),
+                );
+                target_to_mode(c.target)
+            }
+            None => bail!(
+                "No install target is available on this host. \
+                 Install a container runtime (Docker/OrbStack/Podman), QEMU, or run on Ubuntu/Debian as root."
+            ),
+        }
     } else {
         Ui::header(
             "Welcome to Amiterra",
@@ -30,10 +46,7 @@ pub async fn handle_init(args: InitArgs) -> Result<()> {
         prompt_target_environment()?
     };
 
-    let mut ctx = ExecutionContext::resolve(
-        mode == EnvironmentMode::Workstation,
-        mode == EnvironmentMode::Server,
-    );
+    let mut ctx = ExecutionContext::resolve_with_mode(Some(mode));
     ctx.init_args = Some(args.clone());
     ctx.sandbox_engine = sandbox_engine;
     let backend = resolve_backend(ctx.mode);
@@ -93,10 +106,7 @@ fn prompt_target_environment() -> Result<(EnvironmentMode, Option<String>)> {
         match resolve_env_selection(&choices, raw, default_idx)? {
             EnvSelection::Chosen(idx) => {
                 let choice = &choices[idx];
-                Ui::step_done(
-                    &format!("Selected target: {}", choice.target.title()),
-                    None,
-                );
+                Ui::step_done(&format!("Selected target: {}", choice.target.title()), None);
                 return Ok(target_to_mode(choice.target));
             }
             EnvSelection::Unavailable { index, reason } => {
@@ -107,7 +117,9 @@ fn prompt_target_environment() -> Result<(EnvironmentMode, Option<String>)> {
                 ));
                 println!(
                     "  {}",
-                    Palette::dim("Pick a different target. Unavailable options cannot be installed.")
+                    Palette::dim(
+                        "Pick a different target. Unavailable options cannot be installed."
+                    )
                 );
                 println!();
                 // Re-render menu and ask again — never continue with another target.
@@ -224,8 +236,9 @@ fn target_to_mode(target: InitTarget) -> (EnvironmentMode, Option<String>) {
 }
 
 pub async fn handle_join(args: JoinArgs) -> Result<()> {
+    // Join is always a production server node: role/token signals imply Server
+    // in handle_init (no mode flag needed).
     let init_args = InitArgs {
-        server: true,
         role: Some(if args.control_plane {
             "control-plane".to_string()
         } else {
@@ -237,7 +250,10 @@ pub async fn handle_join(args: JoinArgs) -> Result<()> {
         node_external_ip: args.node_external_ip,
         tls_san: args.tls_san,
         yes: args.yes,
+        all_features: args.all_features,
+        storage_disk: args.storage_disk,
         tune_apply: args.tune_apply,
+        gitops_bootstrap: args.gitops_bootstrap,
         dry_run: args.dry_run,
         ..Default::default()
     };
@@ -245,19 +261,19 @@ pub async fn handle_join(args: JoinArgs) -> Result<()> {
 }
 
 pub async fn handle_up(args: UpArgs) -> Result<()> {
-    let ctx = ExecutionContext::resolve(args.dev, args.server);
+    let ctx = ExecutionContext::resolve();
     let backend = resolve_backend(ctx.mode);
     backend.up(&ctx, args.dry_run)
 }
 
-pub async fn handle_down(args: DownArgs) -> Result<()> {
-    let ctx = ExecutionContext::resolve(args.dev, args.server);
+pub async fn handle_down(_args: DownArgs) -> Result<()> {
+    let ctx = ExecutionContext::resolve();
     let backend = resolve_backend(ctx.mode);
     backend.down(&ctx)
 }
 
 pub async fn handle_status(args: StatusArgs) -> Result<()> {
-    let ctx = ExecutionContext::resolve(args.dev, args.server);
+    let ctx = ExecutionContext::resolve();
     let backend = resolve_backend(ctx.mode);
     let report = backend.status(&ctx)?;
 
@@ -301,18 +317,46 @@ pub async fn handle_uninstall(args: UninstallArgs) -> Result<()> {
         }
     }
 
-    let ctx = ExecutionContext::resolve(false, false);
+    let ctx = ExecutionContext::resolve();
     // Clean up both server and workstation artifacts safely
     let server_backend = resolve_backend(EnvironmentMode::Server);
-    let _ = server_backend.uninstall(&ctx, args.purge);
-
     let workstation_backend = resolve_backend(EnvironmentMode::Workstation);
-    workstation_backend.uninstall(&ctx, args.purge)?;
+    let mut failures = Vec::new();
+    if let Err(e) = server_backend.uninstall(&ctx, args.purge) {
+        failures.push(format!("server: {e:#}"));
+    }
+    if let Err(e) = workstation_backend.uninstall(&ctx, args.purge) {
+        failures.push(format!("workstation: {e:#}"));
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "uninstall finished with errors — host may be partially restored:\n  {}",
+            failures.join("\n  ")
+        );
+    }
 
-    Ui::step_done(
-        "All Amiterra components cleanly uninstalled. Host state restored.",
-        None,
-    );
+    // Honest outcome: claim restoration only after checking the host. The
+    // audit re-probes datapath artifacts, accounts and drop-ins; data kept
+    // without --purge is reported as kept, never as "restored".
+    let audit = crate::cleanup::audit(args.purge);
+    for dir in &audit.kept {
+        Ui::step_info("Kept", &format!("{dir} (re-run with --purge to remove)"));
+    }
+    if audit.leftovers.is_empty() {
+        Ui::step_done(
+            "All Amiterra components cleanly uninstalled. Host state restored.",
+            None,
+        );
+    } else {
+        Ui::step_warn("Uninstall finished, but leftovers remain on this host:");
+        for item in &audit.leftovers {
+            println!("     {} {}", Palette::yellow("!"), item);
+        }
+        println!(
+            "     {} Clean these before reinstalling to avoid CIDR drift and stale state.",
+            Palette::dim("→")
+        );
+    }
     println!();
     Ok(())
 }
@@ -350,10 +394,7 @@ mod tests {
         // Regression: user picks option 1 (unavailable) — must NOT continue install.
         let choices = sample_choices();
         let sel = resolve_env_selection(&choices, "1", 3).unwrap();
-        assert!(matches!(
-            sel,
-            EnvSelection::Unavailable { index: 0, .. }
-        ));
+        assert!(matches!(sel, EnvSelection::Unavailable { index: 0, .. }));
     }
 
     #[test]

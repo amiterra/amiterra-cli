@@ -1,0 +1,105 @@
+= Amiterra CLI
+:description: `ami` — one binary for bootstrap, tuning, GitOps, and diagnostics. Safe by default, reversible by design.
+:keywords: CLI, ami, Rust, open core, Kubernetes, GitOps
+:page-aliases: /cli/index.adoc
+
+[.lead]
+The *Amiterra CLI* (`ami`) is the operator-facing control tool for Amiterra private
+clouds and bare-metal nodes: Day-0 bootstrap, guarded kernel tuning, cluster
+lifecycle, GitOps, and diagnostics — in one static binary.
+
+== Start here
+
+[cols="1,2"]
+|===
+|I want to... |Go to
+
+|Get `ami` and run it
+|<<Install,Install>> then xref:quickstart.adoc[Quickstart]
+
+|Understand what it changes on my machine
+|xref:safety.adoc[Safety & Reversibility]
+
+|Look up a command or flag
+|xref:commands.adoc[Command Reference]
+
+|Configure it for automation
+|xref:configuration.adoc[Configuration]
+
+|Check a concern (air-gap, upgrades, multi-node…)
+|xref:faq.adoc[FAQ]
+|===
+
+== The 60-second tour
+
+[source,bash]
+----
+# Install (verifies SHA-256 checksum)
+curl -fsSL https://get.amiterra.io | bash
+
+# Guided setup — the picker and every optional layer ask first
+sudo ami init
+
+# See what you got
+sudo ami status
+----
+
+`ami init` is interactive and *conservative*: base Kubernetes comes up, but
+optional layers (performance tuning, GitOps) are applied only when you say so.
+
+== Why you can trust it
+
+* **Opt-in everything.** Nothing beyond the minimal base is applied without an
+  explicit choice — a prompt, a flag, or a command you ran on purpose.
+* **Reversible — and verified.** Tuning captures a baseline before touching
+  anything; `ami tune rollback` restores it. `ami uninstall` reverts the host
+  and *re-probes it* before claiming restoration — leftovers are listed, never
+  silently ignored.
+* **No secret exfiltration.** Join tokens are never printed in install output;
+  deploy keys are generated on the node and the private key never leaves it.
+  No telemetry is sent without consent.
+* **Guardrails, not guesswork.** Dangerous kernel parameters are refused by
+  policy (`kernel.core_pattern`, `ip_forward` in profiles, panic policy).
+* **Predictable.** Stable exit codes, `--json` on reporting commands,
+  idempotent converge — re-running a command is safe.
+* **No lock-in.** Your Git repository is the source of truth; FSL-1.1-ALv2
+  converts to Apache-2.0 after two years. Air-gapped operation works.
+
+Details and the full model: xref:safety.adoc[Safety & Reversibility].
+
+== What one binary covers
+
+// NOTE for editors: a table cell must never contain a raw `|` — AsciiDoc
+// splits cells on it and the row collapses. List subcommands as separate
+// full commands (as below) or escape the bar as `\|`.
+
+[cols="1,2"]
+|===
+|Area |Commands
+
+|Cluster lifecycle
+|`ami init`, `ami join`, `ami join-command`, `ami up`, `ami down`, `ami status`
+
+|Host tuning (opt-in, reversible)
+|`ami tune plan`, `ami tune apply`, `ami tune rollback`, `ami tune status`
+
+|GitOps (Flux + Git binding, opt-in)
+|`ami gitops bootstrap`, `ami gitops status`
+
+|Storage tiers
+|`ami storage status`, `ami storage plan`, `ami storage prepare`, `ami storage rollback`
+
+|Diagnostics
+|`ami doctor` (alias: `ami preflight`)
+
+|Removal
+|`ami uninstall`
+|===
+
+Full details: xref:commands.adoc[Command Reference].
+
+[NOTE]
+====
+Flags evolve with releases. This site is the map; `ami --help` and
+`ami <command> --help` are the source of truth for your installed version.
+====

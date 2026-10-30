@@ -1,0 +1,142 @@
+= FAQ
+:description: Answers to the questions operators ask before adopting ami — security, stability, upgrades, multi-node, and the future.
+:keywords: faq, support, air-gapped, upgrade, multi-node, troubleshooting
+
+[.lead]
+Honest answers to the questions that matter before you put tooling on a server.
+
+== Security & trust
+
+=== Does `ami` phone home?
+No. There is no telemetry, no license check, and no outbound call during normal
+operation. The only network activity is what you point it at (your Git remote,
+package mirrors during install). `ami uninstall` and offline operation work
+without internet.
+
+=== Where do my secrets live?
+Join tokens are root-only on the control-plane node and revealed only by
+`ami join-command`. The GitOps private key is generated on the node, stored
+`0600`, and never leaves it — even `ami gitops status` shows only a
+fingerprint. See xref:safety.adoc[Safety & Reversibility].
+
+=== Can `ami` brick my kernel?
+It refuses to touch the dangerous knobs (panic policy, `core_pattern`,
+`modprobe`, forwarding rules in tuning profiles). Tuning writes validated
+drop-ins with a captured baseline, and `ami tune rollback` restores them.
+The set of touched subsystems is printed before every apply.
+
+=== What if I don't trust the binary?
+Build it yourself: `git clone` + `make build` + `make test`. The tuning
+profiles and Flux manifests are embedded at build time — the sources in
+`tuning/` and `assets/flux/` are exactly what runs.
+
+== Stability & lifecycle
+
+=== Which versions does it pin?
+k3s and Flux are pinned to specific releases and verified (SHA-256) at install
+and bootstrap time. Upgrading `ami` upgrades the stack deliberately, not by
+accident. `ami status` shows what is running.
+
+=== Can I upgrade an existing cluster?
+Run the new `ami init`/`ami tune` converges on an existing node safely —
+commands are idempotent. Full in-place Kubernetes upgrades with rollback are
+planned; today the tested path is `uninstall` + fresh `init` for major jumps.
+
+=== What happens when a command fails halfway?
+Readiness gates stop the flow before success is reported or state is recorded.
+A failed `gitops bootstrap`, for example, does not claim "bootstrapped" —
+re-run it and it converges from where it stopped.
+
+=== Is this production-ready?
+The primitives (k3s, Cilium, Flux, reversible tuning) are production-grade;
+the orchestration around them is young. Run it on non-critical nodes first,
+keep the `--dry-run` habit, and read xref:safety.adoc[Safety & Reversibility].
+
+== Operations
+
+=== Does it work air-gapped?
+Yes. The binary is static, tuning profiles are embedded, and Flux manifests are
+vendored into the binary with a pinned checksum. Copy the binary, run
+`ami init`, then `ami gitops bootstrap` — no internet required. The default
+GitOps provider is a local bare repository on the node itself.
+
+=== Single node or multi-node?
+Both. `ami init` builds a single-node cluster; `ami join-command` +
+`ami join` adds control-plane (HA) and worker nodes. GitOps bootstrap runs on
+the cluster-init node only — join nodes cannot rebind the cluster's Git
+repository. The target (production vs sandbox) is chosen in one unified picker
+at init and remembered afterwards.
+
+=== How do I script it?
+Non-interactive sessions require `--yes` for mutations (intentional). Use
+`--dry-run` to preview, `--json` on reporting commands for parsing, and stable
+exit codes for CI. See xref:configuration.adoc[Configuration].
+
+=== Where is state stored?
+`~/.amiterra/` (config) and `/var/lib/amiterra/` (baselines, storage and
+GitOps state). Everything is cleaned by `ami uninstall --purge`.
+
+=== Can I uninstall and reinstall on the same host?
+Yes — that is a tested loop. `ami uninstall` removes the Cilium networking
+artifacts (interfaces, netfilter chains) that the k3s uninstaller does not
+know about and verifies the host is clean before claiming success. A fresh
+`ami init` afterwards picks the default pod/service subnets again. Use
+`--purge` if you also want the data and GitOps state gone; without it they
+are kept and reported as such.
+
+== Troubleshooting
+
+=== `ami doctor` reports a problem
+Fix the red items before `init`. Common ones: not root, cgroups v1, missing
+BTF (kernel too old), port 6443 already taken.
+
+=== Init succeeds but `kubectl` shows nodes not ready
+Give Cilium ~30 seconds, then `kubectl get pods -n kube-system`. If the
+networking pods are unhealthy, `sudo ami status` shows the stack state.
+
+=== `gitops status` says "Degraded"
+The live probe reached Flux but the root Kustomization is not Ready. Check
+`kubectl -n flux-system get kustomizations` and the Git remote reachability
+from the node.
+
+=== Tuning didn't seem to change anything
+`ami tune plan` compares current values to the profile — if the plan is empty,
+the system already matched. Some keys apply to new connections only.
+
+=== The pod subnet changed after a reinstall (`Collision-free alternative selected`)
+The network auto-discovery found addresses from a previous cluster still
+occupying the default subnets and honestly picked free ones instead of
+colliding. This is the detector working, not a bug — but it means leftovers
+were present. `ami uninstall` (current versions) removes them and the next
+install returns to the default `10.42/10.43` with `Collision-free verified`.
+On hosts that were uninstalled with an older build, delete leftover `cilium*`
+interfaces manually before reinstalling.
+
+=== `uninstall` says leftovers remain
+Read the list it printed — each item names an artifact (interface, netfilter
+chain, account, drop-in) and why it matters for the next install. Remove them
+manually and re-run `ami uninstall` if needed; the audit will confirm a clean
+host. The summary never claims "Host state restored" while anything is left.
+
+== Roadmap & the future
+
+=== What is the license?
+FSL-1.1-ALv2: free for personal, academic, and internal production use; each
+release converts to Apache-2.0 on its second anniversary. No per-node fees.
+See `LICENSE` and `TRADEMARK.md`.
+
+=== What if the project disappears?
+Your cluster keeps running: desired state is plain YAML in your Git repository,
+reconciled by upstream Flux (Apache-2.0). `ami` is a convenience layer, not a
+runtimes dependency.
+
+=== What's coming next?
+External Git providers (GitHub/GitLab/self-hosted) via `ami gitops connect`,
+in-place cluster upgrades with rollback, multi-node auto-tuning profiles, and
+signed release attestations. See `README.md` for the current feature set.
+
+== Still stuck?
+
+* Run `sudo ami doctor --json` — the diagnostics are designed to be
+  shared verbatim in an issue.
+* Check `sudo ami status` first: it reflects live state, not assumptions.

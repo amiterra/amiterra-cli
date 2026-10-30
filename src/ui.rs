@@ -1,7 +1,7 @@
-use std::io::{stdout, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{IsTerminal, Write, stdout};
 use std::sync::Arc;
-use std::thread::{sleep, spawn, JoinHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{JoinHandle, sleep, spawn};
 use std::time::{Duration, Instant};
 
 /// Visual glyph constants for consistent terminal iconography across platforms.
@@ -32,8 +32,9 @@ pub fn is_color_enabled() -> bool {
         return false;
     }
     if let Ok(force) = std::env::var("CLICOLOR_FORCE")
-        && force != "0" {
-            return true;
+        && force != "0"
+    {
+        return true;
     }
     stdout().is_terminal()
 }
@@ -55,6 +56,13 @@ impl Palette {
     }
     pub fn bold_cyan(s: &str) -> String {
         bold_cyan(s)
+    }
+    /// Command highlights (join strings, copy-paste commands) — bright blue.
+    pub fn blue(s: &str) -> String {
+        blue(s)
+    }
+    pub fn bold_blue(s: &str) -> String {
+        bold_blue(s)
     }
     pub fn green(s: &str) -> String {
         green(s)
@@ -93,6 +101,24 @@ pub fn cyan(s: &str) -> String {
 pub fn bold_cyan(s: &str) -> String {
     if is_color_enabled() {
         format!("\x1b[1;36m{}\x1b[0m", s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Bright blue (94) — readable on dark and light terminals; reserved for
+/// copy-paste commands the operator is expected to run.
+pub fn blue(s: &str) -> String {
+    if is_color_enabled() {
+        format!("\x1b[94m{}\x1b[0m", s)
+    } else {
+        s.to_string()
+    }
+}
+
+pub fn bold_blue(s: &str) -> String {
+    if is_color_enabled() {
+        format!("\x1b[1;94m{}\x1b[0m", s)
     } else {
         s.to_string()
     }
@@ -318,7 +344,12 @@ impl Ui {
     pub fn step_done(message: &str, elapsed: Option<Duration>) {
         if let Some(dur) = elapsed {
             let dur_str = format!("[{:.1}s]", dur.as_secs_f32());
-            println!("  {} {} {}", bold_green(Glyphs::TICK), message, dim(&dur_str));
+            println!(
+                "  {} {} {}",
+                bold_green(Glyphs::TICK),
+                message,
+                dim(&dur_str)
+            );
         } else {
             println!("  {} {}", bold_green(Glyphs::TICK), message);
         }
@@ -446,83 +477,84 @@ impl Ui {
         println!();
     }
 
-/// Calculates visible terminal width by ignoring ANSI escape sequences.
-pub fn visible_width(s: &str) -> usize {
-    let mut in_escape = false;
-    let mut width = 0;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c.is_ascii_alphabetic() {
-                in_escape = false;
+    /// Calculates visible terminal width by ignoring ANSI escape sequences.
+    pub fn visible_width(s: &str) -> usize {
+        let mut in_escape = false;
+        let mut width = 0;
+        for c in s.chars() {
+            if c == '\x1b' {
+                in_escape = true;
+            } else if in_escape {
+                if c.is_ascii_alphabetic() {
+                    in_escape = false;
+                }
+            } else {
+                width += 1;
             }
-        } else {
-            width += 1;
         }
-    }
-    width
-}
-
-/// Applies contextual semantic colors to status labels, URLs, and indicators.
-pub fn colorize_status(s: &str) -> String {
-    let mut res = s.to_string();
-
-    // Normalize text representations first
-    res = res.replace("Stopped / Inactive", "○ inactive (stopped)");
-
-    if !is_color_enabled() {
-        return res;
-    }
-    // If string already contains custom ANSI codes, respect caller styling
-    if res.contains("\x1b[") {
-        return res;
+        width
     }
 
-    // Positive / active statuses
-    res = res.replace("● healthy", &bold_green("● healthy"));
-    res = res.replace("● active", &bold_green("● active"));
-    res = res.replace("● online", &bold_green("● online"));
-    res = res.replace("● ready", &bold_green("● ready"));
-    res = res.replace("● supported", &bold_green("● supported"));
-    res = res.replace("● available", &bold_green("● available"));
-    res = res.replace("READY FOR DEPLOYMENT", &bold_green("READY FOR DEPLOYMENT"));
-    res = res.replace(" READY", &format!(" {}", bold_green("READY")));
+    /// Applies contextual semantic colors to status labels, URLs, and indicators.
+    pub fn colorize_status(s: &str) -> String {
+        let mut res = s.to_string();
 
-    // Warnings / stopped / ineligible
-    res = res.replace("○ inactive", &dim("○ inactive"));
-    res = res.replace("○ ineligible", &dim("○ ineligible"));
-    res = res.replace("○ not ready", &dim("○ not ready"));
-    res = res.replace("○ not initialized", &dim("○ not initialized"));
-    res = res.replace("○ not detected", &dim("○ not detected"));
-    res = res.replace("○ none detected", &dim("○ none detected"));
-    res = res.replace("○ missing", &dim("○ missing"));
-    res = res.replace("○ requires", &dim("○ requires"));
-    res = res.replace("● stopped", &yellow("● stopped"));
-    res = res.replace("(daemon stopped)", &yellow("(daemon stopped)"));
-    res = res.replace("● degraded", &bold_yellow("● degraded"));
+        // Normalize text representations first
+        res = res.replace("Stopped / Inactive", "○ inactive (stopped)");
 
-    // Errors / failures
-    res = res.replace("● unhealthy", &bold_red("● unhealthy"));
-    res = res.replace("NOT READY", &bold_red("NOT READY"));
+        if !is_color_enabled() {
+            return res;
+        }
+        // If string already contains custom ANSI codes, respect caller styling
+        if res.contains("\x1b[") {
+            return res;
+        }
 
-    // Automatically dim secondary metadata in parentheses
-    if let (Some(start), Some(end)) = (res.find('('), res.rfind(')'))
-        && start < end {
+        // Positive / active statuses
+        res = res.replace("● healthy", &bold_green("● healthy"));
+        res = res.replace("● active", &bold_green("● active"));
+        res = res.replace("● online", &bold_green("● online"));
+        res = res.replace("● ready", &bold_green("● ready"));
+        res = res.replace("● supported", &bold_green("● supported"));
+        res = res.replace("● available", &bold_green("● available"));
+        res = res.replace("READY FOR DEPLOYMENT", &bold_green("READY FOR DEPLOYMENT"));
+        res = res.replace(" READY", &format!(" {}", bold_green("READY")));
+
+        // Warnings / stopped / ineligible
+        res = res.replace("○ inactive", &dim("○ inactive"));
+        res = res.replace("○ ineligible", &dim("○ ineligible"));
+        res = res.replace("○ not ready", &dim("○ not ready"));
+        res = res.replace("○ not initialized", &dim("○ not initialized"));
+        res = res.replace("○ not detected", &dim("○ not detected"));
+        res = res.replace("○ none detected", &dim("○ none detected"));
+        res = res.replace("○ missing", &dim("○ missing"));
+        res = res.replace("○ requires", &dim("○ requires"));
+        res = res.replace("● stopped", &yellow("● stopped"));
+        res = res.replace("(daemon stopped)", &yellow("(daemon stopped)"));
+        res = res.replace("● degraded", &bold_yellow("● degraded"));
+
+        // Errors / failures
+        res = res.replace("● unhealthy", &bold_red("● unhealthy"));
+        res = res.replace("NOT READY", &bold_red("NOT READY"));
+
+        // Automatically dim secondary metadata in parentheses
+        if let (Some(start), Some(end)) = (res.find('('), res.rfind(')'))
+            && start < end
+        {
             let inner = &res[start..=end];
             if !inner.contains("\x1b[") {
                 let dimmed = dim(inner);
                 res = format!("{}{}{}", &res[..start], dimmed, &res[end + 1..]);
             }
-    }
+        }
 
-    // URLs (highlighted in cyan)
-    if res.contains("https://127.0.0.1:6443") {
-        res = res.replace("https://127.0.0.1:6443", &cyan("https://127.0.0.1:6443"));
-    }
+        // URLs (highlighted in cyan)
+        if res.contains("https://127.0.0.1:6443") {
+            res = res.replace("https://127.0.0.1:6443", &cyan("https://127.0.0.1:6443"));
+        }
 
-    res
-}
+        res
+    }
 
     /// Renders an actionable error block (What happened -> Why -> How to fix -> Docs).
     pub fn error_box(what: &str, why: &str, steps: &[&str], docs_url: Option<&str>) {
@@ -583,12 +615,21 @@ mod tests {
     #[test]
     fn test_card_rendering_runs() {
         let items = [
-            ("Network Topology", "● Private NAT (192.168.1.165 on en0, Public NAT: 197.151.129.214)"),
-            ("WireGuard Encryption", "○ Optional (Private L2 mesh isolated)"),
+            (
+                "Network Topology",
+                "● Private NAT (192.168.1.165 on en0, Public NAT: 197.151.129.214)",
+            ),
+            (
+                "WireGuard Encryption",
+                "○ Optional (Private L2 mesh isolated)",
+            ),
             ("Cluster Node IP", "192.168.1.165"),
             ("Pod Subnet", "10.42.0.0/16 (Collision-free verified)"),
             ("Service Subnet", "10.43.0.0/16"),
-            ("TLS SANs", "127.0.0.1, localhost, kubernetes, ... (+6 more)"),
+            (
+                "TLS SANs",
+                "127.0.0.1, localhost, kubernetes, ... (+6 more)",
+            ),
         ];
         Ui::card("Amiterra Network Auto-Discovery", &items);
     }
