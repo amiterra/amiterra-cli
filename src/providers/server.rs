@@ -207,7 +207,7 @@ impl EnvironmentBackend for LinuxServerBackend {
                     }
                     s_svc.success(&format!("{} systemd service active", service_name));
                 }
-                wait_for_node_readiness(60)?;
+                wait_for_node_readiness(NODE_READY_TIMEOUT_SECS)?;
 
                 let cfg = AmiterraConfig {
                     mode: EnvironmentMode::Server,
@@ -485,7 +485,7 @@ impl EnvironmentBackend for LinuxServerBackend {
         if node_config.role.is_control_plane() {
             let s3 = Ui::spinner("Deploying Cilium eBPF manifest...");
             fs::create_dir_all("/var/lib/rancher/k3s/server/manifests")?;
-            deploy_cilium_manifest(node_config.wireguard_enabled)?;
+            deploy_cilium_manifest(node_config.wireguard_enabled, &api_server_host(&node_config))?;
             let enc_str = if node_config.wireguard_enabled {
                 "with WireGuard WAN encryption"
             } else {
@@ -561,7 +561,7 @@ impl EnvironmentBackend for LinuxServerBackend {
         // 9. Active readiness probe
         if node_config.role.is_control_plane() {
             let s_ready = Ui::spinner("Waiting for control-plane readiness in cluster...");
-            wait_for_node_readiness(60)?;
+            wait_for_node_readiness(NODE_READY_TIMEOUT_SECS)?;
             s_ready.success("Control-plane node registered and active");
         }
 
@@ -1126,6 +1126,14 @@ pub fn render_k3s_config(config: &ClusterNodeConfig) -> String {
         yaml.push_str("disable-network-policy: true\n");
         yaml.push_str("disable-kube-proxy: true\n");
         yaml.push_str("disable:\n  - traefik\n  - servicelb\n  - local-storage\n");
+        // Без явного advertise-address k3s выбирает node-external-ip (auto-
+        // detected egress IP) — это отравляет endpoints сервиса `kubernetes`:
+        // поды внутри кластера не могут достучаться до API. Всегда рекламируем
+        // приватный cluster IP узла.
+        yaml.push_str(&format!(
+            "advertise-address: \"{}\"\n",
+            yaml_dq(&config.node_ip)
+        ));
         yaml.push_str(&format!(
             "cluster-cidr: \"{}\"\n",
             yaml_dq(&config.pod_cidr)
@@ -1190,7 +1198,26 @@ fn write_tailored_k3s_config(config: &ClusterNodeConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn render_cilium_manifest(wireguard_enabled: bool) -> String {
+/// Host (IP or DNS) of the cluster API endpoint that every node can reach.
+///
+/// `127.0.0.1` is only valid on the node that runs the apiserver itself;
+/// worker nodes must use the real cluster endpoint (server-url host or node-ip).
+pub fn api_server_host(config: &ClusterNodeConfig) -> String {
+    if let Some(url) = &config.server_url {
+        let trimmed = url
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        if let Some(host) = trimmed.split(':').next() {
+            if !host.is_empty() {
+                return host.to_string();
+            }
+        }
+    }
+    config.node_ip.clone()
+}
+
+pub fn render_cilium_manifest(wireguard_enabled: bool, k8s_host: &str) -> String {
     let enc_block = if wireguard_enabled {
         "    encryption:\n      enabled: true\n      type: wireguard"
     } else {
@@ -1206,12 +1233,12 @@ metadata:
 spec:
   repo: https://helm.cilium.io/
   chart: cilium
-  version: "1.16.2"
+  version: "1.20.2"
   targetNamespace: kube-system
   bootstrap: true
   valuesContent: |-
     kubeProxyReplacement: true
-    k8sServiceHost: 127.0.0.1
+    k8sServiceHost: {k8s_host}
     k8sServicePort: 6443
     devices: ""
     ipam:
@@ -1235,13 +1262,20 @@ spec:
     )
 }
 
-fn deploy_cilium_manifest(wireguard_enabled: bool) -> Result<()> {
-    let manifest_content = render_cilium_manifest(wireguard_enabled);
-    let manifest_path = Path::new("/var/lib/rancher/k3s/server/manifests/cilium-helmchart.yaml");
+fn deploy_cilium_manifest(wireguard_enabled: bool, k8s_host: &str) -> Result<()> {
+    let manifest_content = render_cilium_manifest(wireguard_enabled, k8s_host);
+    let manifest_dir = Path::new("/var/lib/rancher/k3s/server/manifests");
+    let manifest_path = manifest_dir.join("cilium.yaml");
     if let Some(parent) = manifest_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(manifest_path, manifest_content)?;
+    fs::write(&manifest_path, manifest_content)?;
+    // Старое имя файла могло оставить после себя прежний манифест с
+    // 127.0.0.1 — удаляем, чтобы не создавать два конфликтующих HelmChart.
+    let stale = manifest_dir.join("cilium-helmchart.yaml");
+    if stale.exists() {
+        let _ = fs::remove_file(stale);
+    }
     Ok(())
 }
 
@@ -1293,6 +1327,10 @@ fn apply_storage_node_labels(_summary: &crate::storage::StoragePlanSummary) -> R
     crate::storage::refresh_node_labels();
     Ok(())
 }
+
+/// Бюджет ожидания Ready-состояния ноды. Холодная загрузка образов CNI
+/// (Cilium ~200 МБ с quay.io) укладывается не всегда — 60с оказывалось мало.
+const NODE_READY_TIMEOUT_SECS: u64 = 300;
 
 fn wait_for_node_readiness(timeout_secs: u64) -> Result<()> {
     let start = std::time::Instant::now();
@@ -1481,6 +1519,9 @@ node-ip: 10.0.0.5
 
         let yaml = render_k3s_config(&config);
         assert!(yaml.contains("node-ip: \"65.109.10.20\""));
+        // Regression: advertise-address обязан быть приватным cluster IP,
+        // иначе endpoints сервиса `kubernetes` отравляются external-ip.
+        assert!(yaml.contains("advertise-address: \"65.109.10.20\""));
         assert!(yaml.contains("cluster-init: true"));
         assert!(yaml.contains("token: \"secret123\""));
         assert!(yaml.contains("cluster-cidr: \"10.42.0.0/16\""));
@@ -1516,16 +1557,50 @@ node-ip: 10.0.0.5
         assert!(!yaml.contains("disable:\n"));
         assert!(!yaml.contains("flannel-backend"));
         assert!(!yaml.contains("disable-kube-proxy"));
+        assert!(!yaml.contains("advertise-address"));
     }
 
     #[test]
     fn test_render_cilium_manifest_encryption() {
-        let manifest_wg = render_cilium_manifest(true);
+        let manifest_wg = render_cilium_manifest(true, "192.168.100.10");
         assert!(manifest_wg.contains("encryption:\n      enabled: true\n      type: wireguard"));
 
-        let manifest_no_wg = render_cilium_manifest(false);
+        let manifest_no_wg = render_cilium_manifest(false, "192.168.100.10");
         assert!(manifest_no_wg.contains("encryption:\n      enabled: false"));
         assert!(!manifest_no_wg.contains("type: wireguard"));
+    }
+
+    #[test]
+    fn test_cilium_manifest_uses_reachable_api_host() {
+        // 127.0.0.1 ломает worker-ноды: у них нет локального apiserver.
+        let manifest = render_cilium_manifest(false, "192.168.100.10");
+        assert!(manifest.contains("k8sServiceHost: 192.168.100.10"));
+        assert!(!manifest.contains("k8sServiceHost: 127.0.0.1"));
+
+        let init = ClusterNodeConfig {
+            role: NodeRole::ControlPlaneInit,
+            node_ip: "10.0.0.5".into(),
+            node_external_ip: None,
+            wireguard_enabled: false,
+            pod_cidr: "10.42.0.0/16".into(),
+            service_cidr: "10.43.0.0/16".into(),
+            tls_sans: vec![],
+            server_url: None,
+            cluster_token: None,
+            isolate_control_plane: false,
+            apply_performance_tuning: false,
+            gitops_bootstrap: false,
+            storage: crate::features::StoragePlan::default(),
+        };
+        assert_eq!(api_server_host(&init), "10.0.0.5");
+
+        let join = ClusterNodeConfig {
+            role: NodeRole::Worker,
+            node_ip: "10.0.0.6".into(),
+            server_url: Some("https://10.0.0.5:6443".into()),
+            ..init
+        };
+        assert_eq!(api_server_host(&join), "10.0.0.5");
     }
 
     #[test]
