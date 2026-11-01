@@ -23,7 +23,7 @@ changes, and how each change is reversed.
 
 [cols="1,2,1"]
 |===
-|Change |Why |Reversed by
+|Change |Details |Reversed by
 
 |k3s installed and running (headless)
 |Kubernetes distribution; no Traefik/ServiceLB/flannel
@@ -34,7 +34,7 @@ changes, and how each change is reversed.
 |`ami uninstall`
 
 |Platform prep sysctls (`98-amiterra-platform.conf`)
-|Pod networking needs `ip_forward` etc.
+|`ip_forward` and related pod-networking settings
 |`ami uninstall` / `ami tune rollback`
 
 |Data root + StorageClass
@@ -50,14 +50,14 @@ Optional layers (only when you opt in):
 
 [cols="1,2,1"]
 |===
-|Change |Why |Reversed by
+|Change |Details |Reversed by
 
 |Performance profile (`99-amiterra-tune.conf`, limits.d)
 |BBR, queue depths, file capacity, swappiness
 |`ami tune rollback`
 
 |Flux controllers + Git binding + deploy key
-|GitOps: Git is the source of truth
+|Flux reconciles from your Git repository
 |`ami gitops` disable (planned) / `ami uninstall`
 
 |Dedicated LVM data disk (volume + filesystem + mount)
@@ -83,7 +83,6 @@ an explicit flag (`--tune-apply`, `--gitops-bootstrap`, `--storage-disk`), or
 * **Never rebinds a cluster to a different Git repository silently.** A second
   node running bootstrap is refused — the existing binding wins.
 * **Never mutates the host in non-interactive sessions without `--yes`.**
-  Silent modification in scripts is treated as a bug.
 * **Never turns optional layers on implicitly.** `--yes` means "safe defaults"
   (base install only), not "everything". Full installs require the explicit
   `--all-features` key or per-layer flags.
@@ -120,8 +119,8 @@ Every tuning parameter passes `SecurityGuardrails` before it can be written:
 * numeric bounds per key (e.g. `vm.swappiness` 0–100, `somaxconn` ranges);
 * unknown or malformed values are rejected, not coerced.
 
-The policy envelope is enforced identically for `ami tune apply`, init-time
-application, and any future dynamic tuning.
+The policy envelope is enforced identically for `ami tune apply` and
+init-time application.
 
 == Reversibility, demonstrated
 

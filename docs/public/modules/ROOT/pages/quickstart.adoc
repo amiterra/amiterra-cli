@@ -49,7 +49,9 @@ The wizard walks you through decisions *before* touching the host:
   * *GitOps bootstrap* — Flux and a Git repository binding.
 
 Then `ami` installs k3s (pinned version, headless — no Traefik, no ServiceLB),
-deploys Cilium eBPF networking, and registers the node. Expect ~1 minute.
+deploys Cilium eBPF networking, and registers the node. Typical time is 1–3
+minutes; the first run also downloads the Cilium images and can take longer on
+a slow link.
 
 TIP: Non-interactive? `sudo ami init -y` accepts safe defaults (base install
 only — optional layers stay **off**). Turn layers on explicitly with

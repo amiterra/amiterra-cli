@@ -75,8 +75,7 @@ sudo ami doctor --json
 ----
 
 Exit codes are stable: `0` for success, non-zero for refusal or failure.
-Mutating commands refuse to run in non-interactive sessions without `--yes` —
-this is intentional, not a bug.
+Mutating commands refuse to run in non-interactive sessions without `--yes`.
 
 == Automation patterns
 
@@ -96,8 +95,7 @@ ami status --json | jq -e '.healthy == true'
 ----
 
 `--yes` accepts safe defaults: the base install only. Optional layers require
-an explicit flag (or `--all-features`) — silent full installs are refused by
-design.
+an explicit flag (or `--all-features`).
 
 == Related
 

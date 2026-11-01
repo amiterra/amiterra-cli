@@ -1,5 +1,5 @@
 = Amiterra CLI
-:description: `ami` — one binary for bootstrap, tuning, GitOps, and diagnostics. Safe by default, reversible by design.
+:description: `ami` — one binary for bootstrap, tuning, GitOps, and diagnostics. Safe by default, reversible.
 :keywords: CLI, ami, Rust, open core, Kubernetes, GitOps
 :page-aliases: /cli/index.adoc
 
@@ -15,7 +15,7 @@ lifecycle, GitOps, and diagnostics — in one static binary.
 |I want to... |Go to
 
 |Get `ami` and run it
-|<<Install,Install>> then xref:quickstart.adoc[Quickstart]
+|xref:install.adoc[Install] then xref:quickstart.adoc[Quickstart]
 
 |Understand what it changes on my machine
 |xref:safety.adoc[Safety & Reversibility]
@@ -34,23 +34,21 @@ lifecycle, GitOps, and diagnostics — in one static binary.
 
 [source,bash]
 ----
-# Install (verifies SHA-256 checksum)
+# Install (verifies SHA-256 checksums) — then continue into the guided setup
 curl -fsSL https://get.amiterra.io | bash
-
-# Guided setup — the picker and every optional layer ask first
-sudo ami init
 
 # See what you got
 sudo ami status
 ----
 
-`ami init` is interactive and *conservative*: base Kubernetes comes up, but
+The setup wizard is interactive and conservative: base Kubernetes comes up, but
 optional layers (performance tuning, GitOps) are applied only when you say so.
+Prefer to install without starting the wizard: `curl -fsSL https://get.amiterra.io | bash -s -- --version`.
 
 == Why you can trust it
 
 * **Opt-in everything.** Nothing beyond the minimal base is applied without an
-  explicit choice — a prompt, a flag, or a command you ran on purpose.
+  explicit choice — a prompt, a flag, or an explicit command.
 * **Reversible — and verified.** Tuning captures a baseline before touching
   anything; `ami tune rollback` restores it. `ami uninstall` reverts the host
   and *re-probes it* before claiming restoration — leftovers are listed, never
@@ -68,10 +66,6 @@ optional layers (performance tuning, GitOps) are applied only when you say so.
 Details and the full model: xref:safety.adoc[Safety & Reversibility].
 
 == What one binary covers
-
-// NOTE for editors: a table cell must never contain a raw `|` — AsciiDoc
-// splits cells on it and the row collapses. List subcommands as separate
-// full commands (as below) or escape the bar as `\|`.
 
 [cols="1,2"]
 |===

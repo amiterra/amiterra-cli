@@ -7,37 +7,46 @@
 [source,bash]
 ----
 curl -fsSL https://get.amiterra.io | bash
-ami --version
 ----
 
-The installer detects `linux/amd64`, `linux/arm64`, and `darwin/arm64`, verifies
-the download against its published SHA-256 checksum, and installs `ami` to
-`/usr/local/bin`. Nothing else is written to the host at this stage — system
-changes happen only when you run `ami init` (and only what you approve there).
+The installer detects `linux/x86_64`, `linux/aarch64`, and `darwin/aarch64`,
+verifies the download against the published SHA-256 checksums, and installs two
+executables: `amiterra` and the `ami` alias.
+
+Install location:
+
+* root: `/usr/local/bin`
+* non-root: `~/.amiterra/bin`, plus symlinks into the first writable directory
+  already on your `PATH` (`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`,
+  `~/bin`, `~/.cargo/bin`)
+* override with `AMITERRA_INSTALL_DIR=<dir>`
+
+With no arguments, the installer continues straight into the guided
+`ami init` wizard (reconnecting the terminal if the script was piped). To
+install only, pass a command instead:
+
+[source,bash]
+----
+curl -fsSL https://get.amiterra.io | bash -s -- --version
+ami --version && ami doctor
+----
+
+System changes happen only when you run `ami init` — the install step itself
+only writes the binaries.
 
 === Verify manually
 
-If you prefer checking the checksum yourself:
+Release files live under `https://get.amiterra.io/dist/latest/`
+(`amiterra-linux-x86_64`, `amiterra-linux-aarch64`, `amiterra-darwin-aarch64`,
+plus `SHA256SUMS`):
 
 [source,bash]
 ----
-curl -fsSL https://get.amiterra.io/SHA256SUMS -o SHA256SUMS
-curl -fsSL https://get.amiterra.io/ami-linux-amd64 -o ami
+curl -fsSL https://get.amiterra.io/dist/latest/SHA256SUMS -o SHA256SUMS
+curl -fsSL https://get.amiterra.io/dist/latest/amiterra-linux-x86_64 -o amiterra
 shasum -a 256 -c SHA256SUMS --ignore-missing
-install -m 0755 ami /usr/local/bin/ami
-----
-
-=== Package managers
-
-[source,bash]
-----
-# Homebrew (macOS / Linux)
-brew install amiterra/tap/ami
-
-# Debian / Ubuntu
-curl -fsSL https://get.amiterra.io/apt/gpg | sudo tee /etc/apt/keyrings/amiterra.gpg
-echo "deb [signed-by=/etc/apt/keyrings/amiterra.gpg] https://get.amiterra.io/apt stable main" | sudo tee /etc/apt/sources.list.d/amiterra.list
-sudo apt update && sudo apt install ami
+sudo install -m 0755 amiterra /usr/local/bin/amiterra
+sudo ln -sf /usr/local/bin/amiterra /usr/local/bin/ami
 ----
 
 == From source
@@ -60,8 +69,8 @@ dependency to fetch:
 
 [source,bash]
 ----
-scp ami-linux-amd64 root@node:/usr/local/bin/ami
-ssh root@node 'ami --version && ami doctor'
+scp amiterra-linux-x86_64 root@node:/usr/local/bin/amiterra
+ssh root@node 'ln -sf /usr/local/bin/amiterra /usr/local/bin/ami && ami --version && ami doctor'
 ----
 
 The GitOps layer (Flux controllers) is *vendored into the binary* with a pinned

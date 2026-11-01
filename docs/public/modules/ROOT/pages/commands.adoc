@@ -37,6 +37,15 @@ Key flags:
 |`--pod-cidr`, `--service-cidr`, `--tls-san`
 |Network and API certificate overrides
 
+|`--server-url`, `--token`
+|Join an existing cluster non-interactively (same values `ami join` takes)
+
+|`--claim-token`
+|Registration token for Amiterra Cloud auto-registration
+
+|`--isolate-control-plane`
+|Taint control-plane nodes so regular workloads do not schedule there
+
 |`--all-features`
 |Enable every *applicable* optional layer (storage, tuning, GitOps) without
 prompts. GitOps applies only on the cluster-init node.
@@ -72,13 +81,14 @@ sudo ami join https://<primary-ip>:6443 --token <token> --control-plane -y
 Get the exact command (with token) from the first node: `ami join-command worker`
 or `ami join-command control-plane`. Supports the same feature flags as `init`
 (`--all-features`, `--storage-disk`, `--tune-apply`, `--gitops-bootstrap`) plus
-`--node-ip`, `--tls-san`, `--dry-run`. GitOps bootstrap is cluster-scoped and is
-skipped with a warning on join nodes.
+`--node-ip`, `--node-external-ip`, `--tls-san`, `--dry-run`. GitOps bootstrap is
+cluster-scoped and is skipped with a warning on join nodes.
 
 == `ami up` / `ami down`
 
 Start or stop the local environment (alias: `ami start` / `ami stop`). The
-active target is remembered from `init` — no mode flags to pass.
+active target is remembered from `init` — no mode flags to pass. `ami up
+--dry-run` shows what would start.
 
 == `ami status`
 
@@ -105,9 +115,8 @@ sudo ami doctor --storage  # storage inventory shortcut
 
 == `ami tune`
 
-Guarded, reversible kernel tuning. The parameter sources live in the
-https://github.com/amiterra/amiterra-cli/tree/main/tuning[`tuning/`] directory
-of the repository and are embedded into the binary at build time.
+Guarded, reversible kernel tuning. The tuning profiles ship inside the binary —
+no external files to fetch, so the commands work air-gapped.
 
 [source,bash]
 ----
@@ -136,6 +145,11 @@ sudo ami gitops bootstrap --dry-run
 sudo ami gitops status
 sudo ami gitops status --json
 ----
+
+Key flags: `--node-ip` (required for the default local provider), `--remote-url`
+(bind an existing Git remote instead of the local bare repository), `--branch`,
+`--cluster-id`, `--no-wait` (do not wait for the root Kustomization),
+`--dry-run`, `--yes`.
 
 * Idempotent: re-running converges and reports what already matches.
 * The private key is generated on the node and never leaves it; Flux gets

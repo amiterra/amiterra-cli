@@ -33,9 +33,10 @@ profiles and Flux manifests are embedded at build time — the sources in
 == Stability & lifecycle
 
 === Which versions does it pin?
-k3s and Flux are pinned to specific releases and verified (SHA-256) at install
-and bootstrap time. Upgrading `ami` upgrades the stack deliberately, not by
-accident. `ami status` shows what is running.
+k3s, Cilium, and Flux are pinned to specific releases — no floating "latest".
+Downloads are checksum-verified at install and bootstrap time. Upgrading `ami`
+moves the stack to the versions pinned in that release. `ami status` shows what
+is running.
 
 === Can I upgrade an existing cluster?
 Run the new `ami init`/`ami tune` converges on an existing node safely —
@@ -68,9 +69,9 @@ repository. The target (production vs sandbox) is chosen in one unified picker
 at init and remembered afterwards.
 
 === How do I script it?
-Non-interactive sessions require `--yes` for mutations (intentional). Use
-`--dry-run` to preview, `--json` on reporting commands for parsing, and stable
-exit codes for CI. See xref:configuration.adoc[Configuration].
+Non-interactive sessions require `--yes` for mutations. Use `--dry-run` to
+preview, `--json` on reporting commands for parsing, and stable exit codes for
+CI. See xref:configuration.adoc[Configuration].
 
 === Where is state stored?
 `~/.amiterra/` (config) and `/var/lib/amiterra/` (baselines, storage and
@@ -91,8 +92,9 @@ Fix the red items before `init`. Common ones: not root, cgroups v1, missing
 BTF (kernel too old), port 6443 already taken.
 
 === Init succeeds but `kubectl` shows nodes not ready
-Give Cilium ~30 seconds, then `kubectl get pods -n kube-system`. If the
-networking pods are unhealthy, `sudo ami status` shows the stack state.
+Give Cilium a minute or two — longer on the first start, when its images are
+pulled — then `kubectl get pods -n kube-system`. If the networking pods are
+unhealthy, `sudo ami status` shows the stack state.
 
 === `gitops status` says "Degraded"
 The live probe reached Flux but the root Kustomization is not Ready. Check
@@ -105,12 +107,12 @@ the system already matched. Some keys apply to new connections only.
 
 === The pod subnet changed after a reinstall (`Collision-free alternative selected`)
 The network auto-discovery found addresses from a previous cluster still
-occupying the default subnets and honestly picked free ones instead of
-colliding. This is the detector working, not a bug — but it means leftovers
-were present. `ami uninstall` (current versions) removes them and the next
-install returns to the default `10.42/10.43` with `Collision-free verified`.
-On hosts that were uninstalled with an older build, delete leftover `cilium*`
-interfaces manually before reinstalling.
+occupying the default subnets and selected free ones instead of colliding.
+This means leftovers from the previous install were present: `ami uninstall`
+(current versions) removes them, and the next install returns to the default
+`10.42/10.43` with `Collision-free verified`. On hosts that were uninstalled
+with an older build, delete leftover `cilium*` interfaces manually before
+reinstalling.
 
 === `uninstall` says leftovers remain
 Read the list it printed — each item names an artifact (interface, netfilter
