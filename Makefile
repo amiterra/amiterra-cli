@@ -172,22 +172,28 @@ publish-linux: dist-linux-amd64 dist-linux-arm64
 	@printf "\033[32m✔ Successfully published Linux binaries to https://get.amiterra.io\033[0m\n"
 
 # -----------------------------------------------------------------------------
-# Local Multi-Node Test Cluster (Ubuntu 26.04 Resolute, QEMU CoW)
+# Local Multi-Node Test Cluster — delegated to the foundation e2e harness
+# (scripts/e2e/ in the amiterra monorepo). The legacy cluster-vm.sh pair was
+# removed (tech-debt 0005: duplicated harness scripts).
 # -----------------------------------------------------------------------------
+E2E_HARNESS ?= ../scripts/e2e
+
 test-cluster:
-	@./scripts/cluster-test.sh
+	@test -x "$(E2E_HARNESS)/run.sh" || { echo "e2e harness not found at $(E2E_HARNESS) — run from the amiterra monorepo (see 'make e2e' there)"; exit 1; }
+	@"$(E2E_HARNESS)/run.sh" run all
 
 cluster-up:
-	@./scripts/cluster-vm.sh up
+	@test -x "$(E2E_HARNESS)/vm.sh" || { echo "e2e harness not found at $(E2E_HARNESS)"; exit 1; }
+	@"$(E2E_HARNESS)/vm.sh" up $(or $(NODES),3)
 
 cluster-down:
-	@./scripts/cluster-vm.sh down
+	@"$(E2E_HARNESS)/vm.sh" down
 
 cluster-status:
-	@./scripts/cluster-vm.sh status
+	@"$(E2E_HARNESS)/vm.sh" status
 
 cluster-ssh:
-	@./scripts/cluster-vm.sh ssh $(or $(NODE),1)
+	@"$(E2E_HARNESS)/vm.sh" ssh $(or $(NODE),1)
 
 # -----------------------------------------------------------------------------
 # Cleanup

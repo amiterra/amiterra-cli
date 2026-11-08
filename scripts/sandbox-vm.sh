@@ -2,7 +2,8 @@
 # =============================================================================
 # Amiterra QEMU Sandbox (single-node fidelity VM)
 # Production-like Ubuntu guest for `ami init` / `ami tune` testing.
-# Reuses the CoW + cloud-init approach from cluster-vm.sh (multi-node e2e).
+# Reuses the CoW + cloud-init approach from the e2e harness
+# (scripts/e2e/vm.sh in the amiterra monorepo).
 # =============================================================================
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
