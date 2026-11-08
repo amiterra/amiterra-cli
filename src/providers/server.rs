@@ -1241,6 +1241,11 @@ spec:
     kubeProxyReplacement: true
     k8sServiceHost: {k8s_host}
     k8sServicePort: 6443
+    # Sized for L2-announcement lease renewals (one renewal per VIP every
+    # leaseRenewDeadline=5s): the chart default qps=10 throttles at ~50 VIPs.
+    k8sClientRateLimit:
+      qps: 50
+      burst: 100
     devices: ""
     ipam:
       mode: kubernetes

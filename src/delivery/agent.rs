@@ -941,6 +941,15 @@ mod tests {
                  repeat the new base in activation_values_content"
             );
         }
+        // Base-only keys the platform must provide (the compiler never emits
+        // them, so they cannot drift by clobbering — but they must exist):
+        // L2-announcement lease renewals exhaust the chart default qps=10.
+        for path in ["/k8sClientRateLimit/qps", "/k8sClientRateLimit/burst"] {
+            assert!(
+                ypath(&base, path).is_some(),
+                "base config missing {path} — L2 announcements throttle at ~50 VIPs without it"
+            );
+        }
         // Airgap digest bypass must actually bypass: `useDigest: false` alone
         // is ineffective while `digest` is non-empty (charts render
         // `tag@sha256:…` refs that imported airgap images never match).
