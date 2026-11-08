@@ -485,7 +485,10 @@ impl EnvironmentBackend for LinuxServerBackend {
         if node_config.role.is_control_plane() {
             let s3 = Ui::spinner("Deploying Cilium eBPF manifest...");
             fs::create_dir_all("/var/lib/rancher/k3s/server/manifests")?;
-            deploy_cilium_manifest(node_config.wireguard_enabled, &api_server_host(&node_config))?;
+            deploy_cilium_manifest(
+                node_config.wireguard_enabled,
+                &api_server_host(&node_config),
+            )?;
             let enc_str = if node_config.wireguard_enabled {
                 "with WireGuard WAN encryption"
             } else {
@@ -1126,10 +1129,10 @@ pub fn render_k3s_config(config: &ClusterNodeConfig) -> String {
         yaml.push_str("disable-network-policy: true\n");
         yaml.push_str("disable-kube-proxy: true\n");
         yaml.push_str("disable:\n  - traefik\n  - servicelb\n  - local-storage\n");
-        // Без явного advertise-address k3s выбирает node-external-ip (auto-
-        // detected egress IP) — это отравляет endpoints сервиса `kubernetes`:
-        // поды внутри кластера не могут достучаться до API. Всегда рекламируем
-        // приватный cluster IP узла.
+        // Without an explicit advertise-address k3s picks node-external-ip
+        // (auto-detected egress IP) — that poisons the `kubernetes` service
+        // endpoints: in-cluster pods cannot reach the API. Always advertise
+        // the node's private cluster IP.
         yaml.push_str(&format!(
             "advertise-address: \"{}\"\n",
             yaml_dq(&config.node_ip)
@@ -1208,10 +1211,8 @@ pub fn api_server_host(config: &ClusterNodeConfig) -> String {
             .trim()
             .trim_start_matches("https://")
             .trim_start_matches("http://");
-        if let Some(host) = trimmed.split(':').next() {
-            if !host.is_empty() {
-                return host.to_string();
-            }
+        if let Some(host) = trimmed.split(':').next().filter(|host| !host.is_empty()) {
+            return host.to_string();
         }
     }
     config.node_ip.clone()
@@ -1249,6 +1250,12 @@ spec:
 {}
     operator:
       replicas: 1
+      image:
+        useDigest: false
+        digest: ""
+    image:
+      useDigest: false
+      digest: ""
     envoy:
       enabled: false
     hubble:
@@ -1270,8 +1277,8 @@ fn deploy_cilium_manifest(wireguard_enabled: bool, k8s_host: &str) -> Result<()>
         fs::create_dir_all(parent)?;
     }
     fs::write(&manifest_path, manifest_content)?;
-    // Старое имя файла могло оставить после себя прежний манифест с
-    // 127.0.0.1 — удаляем, чтобы не создавать два конфликтующих HelmChart.
+    // A previous file name may have left the old manifest with 127.0.0.1
+    // behind — remove it so we do not end up with two conflicting HelmCharts.
     let stale = manifest_dir.join("cilium-helmchart.yaml");
     if stale.exists() {
         let _ = fs::remove_file(stale);
@@ -1328,8 +1335,8 @@ fn apply_storage_node_labels(_summary: &crate::storage::StoragePlanSummary) -> R
     Ok(())
 }
 
-/// Бюджет ожидания Ready-состояния ноды. Холодная загрузка образов CNI
-/// (Cilium ~200 МБ с quay.io) укладывается не всегда — 60с оказывалось мало.
+/// Budget for waiting on node Ready. A cold pull of the CNI images
+/// (~200 MB of Cilium from quay.io) does not always fit in 60s.
 const NODE_READY_TIMEOUT_SECS: u64 = 300;
 
 fn wait_for_node_readiness(timeout_secs: u64) -> Result<()> {
@@ -1519,8 +1526,9 @@ node-ip: 10.0.0.5
 
         let yaml = render_k3s_config(&config);
         assert!(yaml.contains("node-ip: \"65.109.10.20\""));
-        // Regression: advertise-address обязан быть приватным cluster IP,
-        // иначе endpoints сервиса `kubernetes` отравляются external-ip.
+        // Regression: advertise-address must be the private cluster IP,
+        // otherwise the `kubernetes` service endpoints get poisoned with the
+        // external IP.
         assert!(yaml.contains("advertise-address: \"65.109.10.20\""));
         assert!(yaml.contains("cluster-init: true"));
         assert!(yaml.contains("token: \"secret123\""));
@@ -1572,7 +1580,7 @@ node-ip: 10.0.0.5
 
     #[test]
     fn test_cilium_manifest_uses_reachable_api_host() {
-        // 127.0.0.1 ломает worker-ноды: у них нет локального apiserver.
+        // 127.0.0.1 breaks worker nodes: they have no local apiserver.
         let manifest = render_cilium_manifest(false, "192.168.100.10");
         assert!(manifest.contains("k8sServiceHost: 192.168.100.10"));
         assert!(!manifest.contains("k8sServiceHost: 127.0.0.1"));
