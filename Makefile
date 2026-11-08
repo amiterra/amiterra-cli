@@ -109,16 +109,18 @@ dist-linux-arm64:
 build-docker-binary:
 	@docker build --platform linux/$(DOCKER_ARCH) -t $(BUILDER_IMAGE) -f ci/app/Dockerfile .
 	@echo "=> Building release binary for linux/$(DOCKER_ARCH)..."
+	# The parent workspace is mounted (not just amiterra-cli) so the path
+	# dependencies on ../amispec-core/crates resolve inside the container.
 	@docker run --rm --platform linux/$(DOCKER_ARCH) \
-		-v $(CURDIR):/app \
+		-v $(CURDIR)/..:/workspace \
 		-v cargo-cache:/usr/local/cargo/registry \
-		-v cargo-target-$(DOCKER_ARCH):/app/target \
-		-w /app $(BUILDER_IMAGE) cargo build --release
+		-v cargo-target-$(DOCKER_ARCH):/workspace/amiterra-cli/target \
+		-w /workspace/amiterra-cli $(BUILDER_IMAGE) cargo build --release
 	@mkdir -p out/ dist/dist/latest dist/latest
 	@docker run --rm --platform linux/$(DOCKER_ARCH) \
-		-v cargo-target-$(DOCKER_ARCH):/app/target \
+		-v cargo-target-$(DOCKER_ARCH):/workspace/amiterra-cli/target \
 		-v $(CURDIR)/out:/out \
-		$(BUILDER_IMAGE) cp /app/target/release/amiterra /out/amiterra-linux-$(DIST_ARCH)
+		$(BUILDER_IMAGE) cp /workspace/amiterra-cli/target/release/amiterra /out/amiterra-linux-$(DIST_ARCH)
 	@cp out/amiterra-linux-$(DIST_ARCH) out/amiterra
 	@ln -sf amiterra out/ami
 	@cp out/amiterra-linux-$(DIST_ARCH) dist/dist/latest/amiterra-linux-$(DIST_ARCH)

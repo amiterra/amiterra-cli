@@ -3,6 +3,7 @@ pub mod cleanup;
 mod cli;
 mod context;
 mod daemon;
+pub mod delivery;
 pub mod discovery;
 pub mod features;
 pub mod gitops;
@@ -107,6 +108,12 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Commands::Gitops(args)) => {
             gitops::cli::handle_gitops(args)?;
+        }
+        Some(Commands::Topology(args)) => {
+            delivery::cli::handle_topology(args)?;
+        }
+        Some(Commands::Apply(args)) => {
+            delivery::cli::handle_apply(args)?;
         }
         Some(Commands::JoinCommand { role, json }) => {
             join_command::handle(role.as_deref(), json)?;

@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
+use crate::delivery::cli::{ApplyArgs, TopologyArgs};
 use crate::gitops::cli::GitopsArgs;
 use crate::storage::cli::StorageArgs;
 use crate::tune::cli::TuneArgs;
@@ -44,6 +45,12 @@ pub enum Commands {
 
     /// Bootstrap GitOps (Flux + Git binding), inspect state — opt-in, idempotent
     Gitops(GitopsArgs),
+
+    /// Validate or review a topology against the passport catalog (local door)
+    Topology(TopologyArgs),
+
+    /// Deliver a topology through the signed intent channel (local door)
+    Apply(ApplyArgs),
 
     /// Print the full node join command (embeds the cluster token — run on the control plane)
     JoinCommand {

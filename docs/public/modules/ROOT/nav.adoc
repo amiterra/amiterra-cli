@@ -3,5 +3,7 @@
 * xref:quickstart.adoc[Quickstart]
 * xref:commands.adoc[Command Reference]
 * xref:configuration.adoc[Configuration]
+* xref:topology-exposure.adoc[Topology-driven Exposure]
+* xref:deploy-an-application.adoc[Deploy an Application]
 * xref:safety.adoc[Safety & Reversibility]
 * xref:faq.adoc[FAQ]

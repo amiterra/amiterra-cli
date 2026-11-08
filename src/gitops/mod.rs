@@ -76,6 +76,18 @@ pub struct BootstrapReport {
     pub converged_at: String,
 }
 
+/// One applied intent from the `_intent/` journal (audit surface).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IntentSummary {
+    pub change_id: String,
+    pub applied_at: String,
+    pub status: String,
+    pub origin: String,
+    pub actor: String,
+    /// Short tree hash (12 hex chars) — the review↔result binding.
+    pub tree_hash: String,
+}
+
 /// Human-readable converge report for `ami gitops status`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GitopsStatus {
@@ -87,6 +99,12 @@ pub struct GitopsStatus {
     pub key_fingerprint: Option<String>,
     /// Live Flux sync health (M1: probed from the cluster, not from state.yaml).
     pub sync: flux::SyncHealth,
+    /// `_intent/` journal (newest last) — what was applied and when.
+    #[serde(default)]
+    pub intent_log: Vec<IntentSummary>,
+    /// Drift of the fleet repo (`decompile(tree)` vs `topology.yaml`).
+    #[serde(default)]
+    pub drift: Option<String>,
 }
 
 /// Conservative grammar for values that end up in rendered YAML and filesystem
@@ -371,6 +389,7 @@ pub fn status() -> Result<GitopsStatus> {
     let key_fingerprint = keys::load_existing(PathBuf::from(PRIVATE_KEY_PATH).as_path())
         .ok()
         .map(|k| k.fingerprint);
+    let (intent_log, drift) = delivery_status();
     Ok(GitopsStatus {
         installed: state.is_some(),
         private_key_present,
@@ -378,7 +397,57 @@ pub fn status() -> Result<GitopsStatus> {
         state,
         key_fingerprint,
         sync: flux::live_sync_health(),
+        intent_log,
+        drift,
     })
+}
+
+/// Best-effort delivery journal + drift from the local fleet repository.
+/// Never fails the status command — an unreachable repo just yields empty data.
+fn delivery_status() -> (Vec<IntentSummary>, Option<String>) {
+    use crate::delivery::agent::RepoWriter;
+    use crate::delivery::intent::journal_entries;
+
+    let repo_path = PathBuf::from(local_bare::REPO_PATH);
+    if !repo_path.exists() {
+        return (Vec::new(), None);
+    }
+    let writer = RepoWriter::new(repo_path, DEFAULT_BRANCH.to_string());
+    if writer.head().ok().flatten().is_none() {
+        return (Vec::new(), None);
+    }
+    let log = journal_entries(&writer)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|r| IntentSummary {
+                    change_id: r.metadata.change_id.clone(),
+                    applied_at: r.metadata.applied_at.clone(),
+                    status: r.spec.status.clone(),
+                    origin: r.spec.origin.to_string(),
+                    actor: r.spec.actor.clone(),
+                    tree_hash: r
+                        .spec
+                        .tree_hash
+                        .trim_start_matches("sha256:")
+                        .chars()
+                        .take(12)
+                        .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let drift = std::fs::read_to_string(GitopsState::default_path())
+        .ok()
+        .and_then(|raw| serde_yaml::from_str::<GitopsState>(&raw).ok())
+        .and_then(|st| {
+            let topo_path = format!("clusters/{}/topology.yaml", st.cluster_id);
+            let topology = writer.read_file(&topo_path).ok().flatten()?;
+            crate::delivery::drift::detect(&writer, &topology)
+                .ok()
+                .map(|r| r.summary())
+        });
+    (log, drift)
 }
 
 /// Print the status as a human-readable card or JSON.
@@ -420,6 +489,22 @@ pub fn print_status(json: bool) -> Result<()> {
                     ("Seed", s.seed_sha.as_deref().unwrap_or("—")),
                     ("Converged at", &s.converged_at),
                 ],
+            );
+        }
+    }
+    match &st.drift {
+        Some(d) => println!("  Drift           : {d}"),
+        None => println!(
+            "  Drift           : {}",
+            Palette::dim("— (no compiled tree yet)")
+        ),
+    }
+    if !st.intent_log.is_empty() {
+        println!("  Recent changes  :");
+        for e in st.intent_log.iter().rev().take(5) {
+            println!(
+                "    {}  {}  {}  tree {}  ({}/{})",
+                e.applied_at, e.change_id, e.status, e.tree_hash, e.origin, e.actor
             );
         }
     }

@@ -104,20 +104,32 @@ impl LocalBare {
         rest.strip_suffix(')').map(|h| h.to_string())
     }
 
-    /// Locate the SSH host public key line (ed25519 preferred, then rsa).
-    fn read_host_key_line(&self) -> Result<String> {
+    /// Locate ALL SSH host public key lines (one per key type).
+    ///
+    /// Recording a single key is not enough: the SSH client (Flux/go-git)
+    /// negotiates its own host-key algorithm, and an unrecorded type fails
+    /// with `knownhosts: key mismatch` even though the host identity is
+    /// legitimate. Every published host key must land in known_hosts.
+    fn read_host_key_lines(&self) -> Result<Vec<String>> {
         if let Some(line) = &self.cfg.host_key_line {
-            return Ok(line.clone());
+            return Ok(vec![line.clone()]);
         }
+        let mut lines = Vec::new();
         for name in [
             "ssh_host_ed25519_key.pub",
-            "ssh_host_rsa_key.pub",
             "ssh_host_ecdsa_key.pub",
+            "ssh_host_rsa_key.pub",
         ] {
             let path = Path::new("/etc/ssh").join(name);
             if let Ok(raw) = fs::read_to_string(&path) {
-                return Ok(raw.trim().to_string());
+                let trimmed = raw.trim().to_string();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed);
+                }
             }
+        }
+        if !lines.is_empty() {
+            return Ok(lines);
         }
         bail!(
             "No SSH host public key found in /etc/ssh; cannot build known_hosts (zero-TOFU source). \
@@ -351,8 +363,12 @@ impl GitProvider for LocalBare {
     }
 
     fn known_hosts(&self) -> Result<String> {
-        let raw = self.read_host_key_line()?;
-        known_hosts_entry(&self.cfg.node_ip, &raw)
+        let entries: Result<Vec<String>> = self
+            .read_host_key_lines()?
+            .iter()
+            .map(|raw| known_hosts_entry(&self.cfg.node_ip, raw))
+            .collect();
+        Ok(entries?.join("\n"))
     }
 
     fn seed_commit(&mut self, tree: &SeedTree, spec: &RepoSpec) -> Result<SeedCommit> {

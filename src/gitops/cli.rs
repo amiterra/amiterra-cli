@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use super::{BootstrapOptions, DEFAULT_BRANCH, DEFAULT_CLUSTER_ID, bootstrap, print_status};
+use crate::delivery::cli::IntentServeArgs;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct GitopsArgs {
@@ -43,6 +44,8 @@ pub enum GitopsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Run the gitops-agent intent channel (signed TopologyChange → commit)
+    IntentServe(IntentServeArgs),
 }
 
 pub fn handle_gitops(args: GitopsArgs) -> Result<()> {
@@ -73,6 +76,7 @@ pub fn handle_gitops(args: GitopsArgs) -> Result<()> {
             Ok(())
         }
         GitopsCommand::Status { json } => print_status(json),
+        GitopsCommand::IntentServe(args) => crate::delivery::cli::handle_intent_serve(args),
     }
 }
 

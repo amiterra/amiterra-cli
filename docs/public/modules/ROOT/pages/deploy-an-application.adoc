@@ -1,0 +1,133 @@
+= Deploy an Application
+:description: Pick passports from the catalog, review the compiled bundle, apply through the signed intent channel — or do the same locally, fully air-gapped.
+:keywords: deploy, application, catalog, topology, intent, gitops, flux, apply
+
+[.lead]
+Applications reach a cluster as one **verifiable bundle**: catalog pins +
+`topology.yaml` + the compiled GitOps tree. You review exactly what will ship
+(`tree_hash` binds the review to the result), and a signed intent is the only
+thing that moves the fleet repository — the agent re-compiles locally and
+refuses to commit if anything was swapped on the way.
+
+== The two doors
+
+Both doors produce the **same bundle** through the same compiler and the same
+validation rules — pick whichever fits your workflow.
+
+[cols="1,3", options="header"]
+|===
+|Door |Flow
+
+|console.amiterra.io
+|pick passports → topology assembled (dependencies auto-completed) → review diff → *Apply* → agent commits → Flux deploys
+
+|Local (CLI, air-gap)
+|write `topology.yaml` + a catalog directory → `ami topology validate` → `ami topology diff` → `ami apply` → agent commits → Flux deploys
+|===
+
+== Local door walkthrough
+
+. *Catalog* — a directory of passport YAML files (your apps and their
+  dependencies). A passport declares `provides`/`requires` slots; the
+  validator rejects a topology whose `requires` are not closed by bindings.
+. *Topology* — `topology.yaml` selecting components, sizing and exposure:
+
++
+[source,yaml]
+----
+clusters:
+  - id: c0
+    name: Prod
+    domain: example.io
+    security: { sopsRecipients: [age1…] }
+    cni: { engine: cilium-ebpf, clusterMeshId: 1 }
+    loadBalancers:
+      - { id: main-l7, layer: l7-gateway, provider: cilium-envoy }
+    components:
+      - id: web
+        passport: frontend          # requires edge: http-l7-gateway
+        version: "1.0.0"
+        passportRev: 1
+        expose:
+          - { endpoint: web, viaBalancer: main-l7, scope: public, hostname: app.example.io }
+      - id: bal
+        passport: balancer-cilium-l7 # provides l7: http-l7-gateway
+        version: "1.0.0"
+        passportRev: 1
+    bindings:
+      - { from: web, to: bal, toSlot: l7, asRequirement: edge }   # closes the requirement
+----
+
+. *Validate* — the same rule set the API preview runs (schema, exposure rules,
+  dependency closure). Non-zero exit codes make it a CI gate:
+
++
+[source,bash]
+----
+ami topology validate -f topology.yaml --catalog ./catalog/
+----
+
+. *Review* — the delivery bundle with its content hashes. `tree_hash` is the
+  contract between what you see and what ships:
+
++
+[source,bash]
+----
+ami topology diff -f topology.yaml --catalog ./catalog/
+# tree_hash:   sha256:…
+# schema_hash: sha256:…
+# catalog pins: …
+# compiled tree (N files): …
+----
+
+. *Apply* — builds a signed `TopologyChange` intent (operator key) and sends
+  it to the local agent over the unix socket (`/var/lib/amiterra/gitops/intent.sock`):
+
++
+[source,bash]
+----
+ami apply -f topology.yaml --catalog ./catalog/ --yes
+# applied: commit … (tree_hash verified by the agent)
+----
+
+. *Agent* (verify-don't-trust) — verifies the signature against its allowlist,
+  re-compiles `catalog + topology` with its own `amispec-compile`, compares
+  `tree_hash` with the reviewed value and commits **only** on a match:
+  `catalog/` pins, `clusters/<id>/topology.yaml`, the compiled stages and an
+  `_intent/<change-id>.yaml` audit record. Flux does the rest.
+
+The agent endpoint is normally hosted by `amiterra.service`; for single-node
+and test setups run `ami gitops intent-serve` (see `--help` for socket, repo
+and allowlist overrides).
+
+== What lands in Git
+
+[source]
+----
+catalog/<id>/rev<N>.yaml      # pinned passports (id@rev + content + sha256)
+clusters/<id>/topology.yaml   # source of truth
+clusters/<id>/01..06/…        # compiled stages (Flux input, provenance labels)
+_intent/<change-id>.yaml      # audit: change_id, tree_hash, signature, prev_head
+----
+
+No secrets ever enter the repository — only `sops://` references encrypted for
+the cluster's `sopsRecipients` (ADR 0009). The SaaS never holds Git write
+credentials (ADR 0014); every commit is the agent's.
+
+== Safety properties
+
+* *What you reviewed is what ships* — `expectedTreeHash` is verified by the
+  agent; a tampered bundle or a compiler mismatch is refused before any commit.
+* *Idempotent delivery* — re-delivering the same `change_id` is a no-op; the
+  journal (`ami gitops status`) records every application.
+* *Rollback* — re-apply a previous bundle (new intent, old content); Flux
+  `prune` removes what went away. `prevHead` in the journal is the rollback base.
+* *Drift is visible* — `ami gitops status` decompiles the committed tree and
+  compares it with `topology.yaml`; hand edits show up as drift and are
+  overwritten by the next apply (the repository is not a hand-editing surface).
+* *Air-gap* — validate/compile/apply run fully offline with the local-bare Git
+  provider; the only infrastructure is the node itself.
+
+See also: xref:topology-exposure.adoc[Topology-driven Exposure] for the
+exposure contract, and the platform Design Docs 0020/0026 for the intent
+lifecycle and the bundle format.

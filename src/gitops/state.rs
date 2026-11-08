@@ -69,6 +69,15 @@ impl GitopsState {
     }
 }
 
+/// Current unix time (seconds) — clock seam for intent TTL checks.
+pub fn now_epoch() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Current UTC timestamp in RFC3339 (second precision).
 pub fn now_rfc3339() -> String {
     // Avoid a chrono dependency: format from SystemTime.

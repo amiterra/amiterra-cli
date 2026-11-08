@@ -1,0 +1,139 @@
+= Topology-driven Exposure
+:description: Describe service exposure in topology.yaml and let the platform compile the balancer — no ingress manifests in your app.
+:keywords: topology, exposure, gateway, cilium, load balancer, gitops, tls
+
+[.lead]
+Exposure is a property of your *topology*, not of your application. You declare
+what talks to the outside world in `topology.yaml`; the compiler materializes a
+balancer and routes into the GitOps tree. The cluster created by `ami init`
+stays headless until you ask for exposure — and goes back to headless when you
+remove it.
+
+== Declaring exposure
+
+Every component lists the endpoints it publishes. Each `expose[]` entry names
+an endpoint contract from the component passport, a balancer, and how the edge
+looks:
+
+[source,yaml]
+----
+clusters:
+  - id: prod
+    name: Production
+    domain: example.io            # base DNS zone of the cluster
+    loadBalancers:
+      - id: main-l7
+        layer: l7-gateway
+        provider: cilium-envoy    # default L7 provider (Cilium Envoy + Gateway API)
+        tls: letsencrypt-dns01-wildcard
+    components:
+      - id: web
+        passport: stateless-app
+        version: "1.0.0"
+        passportRev: 1
+        expose:
+          - endpoint: web               # interfaces.endpoints[].name in the passport
+            viaBalancer: main-l7
+            scope: public
+            hostname: example.io        # apex / external domain, used as-is
+          - endpoint: admin
+            viaBalancer: main-l7
+            scope: protected
+            subdomain: admin            # expands to admin.example.io
+            securityPolicy:
+              clientAuth: oidc          # requires an oidc-protection binding
+----
+
+The backend port is never written by hand: it comes from the passport endpoint
+contract (`containerPort` of the named endpoint). A missing contract stops the
+compile with a precise error.
+
+== Hosts, paths and conflicts
+
+* `hostname` — apex or external domain, used as-is.
+* `subdomain` — expands to `<subdomain>.<cluster.domain>`.
+* neither — `<component-id>.<cluster.domain>` (ADR 0009 virtual-host convention).
+* `pathPrefix` — `PathPrefix` match, default `/`.
+* Duplicate `(host, path)` within a cluster, and duplicate `(component,
+  endpoint)`, are validation errors — the compiler never emits ambiguous routes.
+
+== Balancers and providers
+
+`viaBalancer` must resolve to a declared `loadBalancers[].id`. Recommended
+providers:
+
+[cols="1,2,3", options="header"]
+|===
+|Provider |Layer |What the compiler materializes
+
+|`cilium-envoy`
+|`l7-gateway`
+|Cilium Envoy + Gateway API: HelmChartConfig merge (envoy/gatewayAPI), GatewayClass, Gateway, routes, TLS chain
+
+|`cilium-ingress`
+|`l7-gateway`
+|Cilium Ingress variant (Ingress API, `ingressClassName: cilium`)
+
+|`cilium-l4-bgp`
+|`l4-balancer`
+|L4 `Service type: LoadBalancer` (DSR/Maglev), IP pool + prereq checklist
+
+|`k3s-servicelb`
+|`l4-balancer`
+|klipper-lb emergency path (leaves the headless baseline)
+
+|`cloudflare` / `fastly`
+|`edge-proxy`
+|No in-cluster objects — trust borders and DNS expectations only
+|===
+
+Unknown providers are rejected before delivery (fail-fast, no silent stubs).
+HTTP-level exposure (`hostname`/`subdomain`/`pathPrefix`/`securityPolicy`)
+requires an `l7-gateway` balancer; `edge-proxy` is chained via `upstreamEdge`,
+never referenced directly.
+
+== TLS
+
+`loadBalancers[].tls` selects the certificate strategy:
+
+* `letsencrypt-http01` / `letsencrypt-dns01-wildcard` / `letsencrypt-auto` —
+  cert-manager + issuer + certificates are compiled (the only extra dependency);
+* `custom-secret` — bring your own Secret `<lb-id>-tls` (SOPS/vault); nothing
+  secret-valued is ever compiled;
+* `none` — plaintext (a warning accompanies `scope: protected`).
+
+`scope: protected` requires `securityPolicy.clientAuth` (`oidc` needs an
+`oidc-protection` binding; `mtls` and rate limiting are carried as contract
+annotations until their enforcement APIs are stable), or an explicit
+`securityPolicy.allowAnonymous: true` when you really mean an open edge.
+
+== The compiled GitOps tree
+
+For a cluster with `Σ expose[] > 0` the compiler adds (all objects carry
+`amispec.io/*` provenance labels and are fully reversible via `decompile`):
+
+[source]
+----
+clusters/<id>/
+  02-operators-and-networking/
+    balancer-activation.yaml   # HelmChartConfig merge + cert-manager chain
+    gateways.yaml              # GatewayClass + Gateway (+ certificates)
+  05-applications/
+    routes.yaml                # HTTPRoute / Ingress / L4 Services + backends
+  06-zero-trust-and-observability/
+    edge-policies.yaml         # scope guards + trust borders
+----
+
+Delivery is the single GitOps write path (`ami gitops`); Flux applies stages in
+order so routes never land before their Gateway is programmed.
+
+== The headless invariant
+
+A topology without `expose[]` compiles **zero** balancing objects — no
+Gateway, no HTTPRoute, no HelmChartConfig, no cert-manager. Removing the last
+exposure removes the artifacts and returns the cluster to exactly the
+`ami init` baseline.
+
+See also: link:https://github.com/amispec/amispec[AmiSpec specification]
+(`amispec/docs/specification.adoc`, "Exposure contract") and Design Doc 0025 in
+the platform repository.
