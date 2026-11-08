@@ -408,8 +408,9 @@ impl EnvironmentBackend for LinuxServerBackend {
                 };
                 let cilium_desc = format!("kube-proxy replacement · encryption={}", enc);
                 println!(
-                    "    {} 3. Deploy Cilium eBPF v1.16.2:  {}",
+                    "    {} 3. Deploy Cilium eBPF v{}:  {}",
                     crate::ui::Palette::cyan("›"),
+                    CILIUM_CHART_VERSION,
                     crate::ui::Palette::dim(&cilium_desc)
                 );
             }
@@ -470,7 +471,9 @@ impl EnvironmentBackend for LinuxServerBackend {
 
         // 5. K3s binary check & headless install
         if !Path::new("/usr/local/bin/k3s").exists() {
-            let s_k3s = Ui::spinner("Installing K3s binary (v1.37.1+k3s1, headless)...");
+            let s_k3s = Ui::spinner(format!(
+                "Installing K3s binary ({K3S_VERSION}, headless)..."
+            ));
             install_k3s_binary(&node_config)?;
             s_k3s.success("K3s binary installed");
         }
@@ -1221,6 +1224,12 @@ pub fn api_server_host(config: &ClusterNodeConfig) -> String {
     config.node_ip.clone()
 }
 
+/// Pinned k3s release installed by `ami init` / `ami join` (platform contract;
+/// surfaced by `ami versions`, see `contracts`).
+pub const K3S_VERSION: &str = "v1.37.1+k3s1";
+/// Pinned Cilium Helm chart version (platform contract; `ami versions`).
+pub const CILIUM_CHART_VERSION: &str = "1.20.2";
+
 pub fn render_cilium_manifest(wireguard_enabled: bool, k8s_host: &str) -> String {
     let enc_block = if wireguard_enabled {
         "    encryption:\n      enabled: true\n      type: wireguard"
@@ -1237,7 +1246,7 @@ metadata:
 spec:
   repo: https://helm.cilium.io/
   chart: cilium
-  version: "1.20.2"
+  version: "{CILIUM_CHART_VERSION}"
   targetNamespace: kube-system
   bootstrap: true
   valuesContent: |-
@@ -1314,7 +1323,7 @@ fn install_k3s_binary(config: &ClusterNodeConfig) -> Result<()> {
     // Timeouts bound the supply-chain window and prevent a hung mirror from
     // stalling init forever; `pipefail` surfaces curl failures to the exit code.
     let cmd = format!(
-        "set -e -o pipefail; curl -sfL --connect-timeout 30 --max-time 300 https://get.k3s.io | INSTALL_K3S_SKIP_START=true INSTALL_K3S_VERSION=\"v1.37.1+k3s1\" INSTALL_K3S_EXEC=\"{}\" sh -s -",
+        "set -e -o pipefail; curl -sfL --connect-timeout 30 --max-time 300 https://get.k3s.io | INSTALL_K3S_SKIP_START=true INSTALL_K3S_VERSION=\"{K3S_VERSION}\" INSTALL_K3S_EXEC=\"{}\" sh -s -",
         exec_type
     );
     let output = Command::new("sh").arg("-c").arg(&cmd).output();

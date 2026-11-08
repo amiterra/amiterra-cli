@@ -1,0 +1,226 @@
+= Platform Contracts
+:description: Everything the Amiterra platform guarantees — names, paths, versions, and forms you may rely on.
+
+A *contract* is any name, path, version, or output form that crosses the
+boundary between the platform and your applications. Contracts are
+guarantees: `stable` values change only as a release event (changelog +
+deprecation window), never silently. Everything outside this registry
+carries no guarantees.
+
+The registry is the single source of truth; a contract test keeps this page
+in sync with the binary (`ami contracts`), so a constant cannot drift from
+its documentation.
+
+== Discoverability
+
+* `ami contracts [--json] [--section <name>]` — the full registry, offline.
+* `ami versions [--json]` — pinned component versions (the exact values the
+  installer deploys; plan compatibility against these, not against "latest").
+* `ami doctor` — verifies contract invariants against the live host/cluster
+  (StorageClass, data root, Cilium manifest invariants, foreign PVC classes).
+
+== Storage
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `storage-class-local`
+| `amiterra-local`
+| stable
+| `storage/mod.rs::LOCAL_SC_NAME`
+
+| `storage-data-root`
+| `/var/lib/amiterra/data`
+| stable
+| `storage/mod.rs::DATA_ROOT`
+
+| `storage-lvm-names`
+| `amiterra-data / data`
+| stable
+| `storage/prepare.rs::{DEFAULT_VG,DATA_LV}`
+
+| `storage-labels`
+| `amiterra.io/storage-class, amiterra.io/storage-tier, amiterra.io/storage-policy`
+| stable
+| `storage/mod.rs::LABEL_*`
+|===
+
+Stateful passports reference `amiterra-local` — the name is stable across
+provisioner swaps. PVCs with other classes still work, but sit outside
+platform guarantees (`ami doctor` warns honestly).
+
+== GitOps & delivery
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `gitops-repo-layout`
+| `clusters/<id>/{flux-system, 01-node-tuning, 02-operators-and-networking, 03-stateful-clusters, 04a-provisioners-day2, 04b-app-migrations-expand, 05-applications, 06-zero-trust-and-observability}, catalog/, topology.yaml, _intent/, _meta/`
+| stable
+| `amispec-compile` (Design Doc 0026 §1.3)
+
+| `gitops-remote`
+| `ssh://amiterra-git@<node-ip>/var/lib/amiterra/git/infra.git`
+| stable
+| `gitops/local_bare.rs::{GIT_USER,REPO_PATH}`
+
+| `gitops-write-channel`
+| `/var/lib/amiterra/gitops/intent.sock`
+| stable
+| `delivery/channel.rs::default_socket`
+
+| `gitops-intent-audit`
+| `_intent/<change-id>.yaml` + `Change-Id` commit trailer
+| stable
+| `delivery/{intent,agent}.rs`
+
+| `gitops-state`
+| `/var/lib/amiterra/gitops/state.yaml`
+| stable
+| `gitops/state.rs::STATE_PATH`
+
+| `gitops-flux-namespace`
+| `flux-system`
+| stable
+| `gitops/flux.rs::FLUX_NAMESPACE`
+|===
+
+== Cluster
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `cluster-api-access`
+| port `6443`, token `/var/lib/rancher/k3s/server/node-token`, k3s config `/etc/rancher/k3s/config.yaml`
+| stable
+| `join_command.rs`
+
+| `cluster-cilium-invariants`
+| manifest `/var/lib/rancher/k3s/server/manifests/cilium.yaml` — k8sServiceHost = cluster endpoint, advertise-address = node-ip
+| stable
+| `providers/server.rs::render_cilium_manifest`
+|===
+
+The Cilium invariants are the difference between a working multi-node
+cluster and a broken one; `ami doctor` checks both.
+
+== Version pins
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `versions-pins`
+| k3s `v1.37.1+k3s1`, Cilium chart `1.20.2`, Flux `2.10.0`, cert-manager `v1.16.2`, AmiSpec schema `1.0.0`
+| stable
+| installer constants (`ami versions`)
+|===
+
+A pin change is a release event. Read `ami versions --json` for tooling —
+never scrape the network for "latest".
+
+== State files
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `state-baseline`
+| `/var/lib/amiterra/tune-baseline.yaml`
+| stable
+| `tune/mod.rs::BASELINE_PATH`
+
+| `state-network`
+| `/var/lib/amiterra/network-state.yaml`
+| stable
+| `network/mod.rs::STATE_PATH`
+|===
+
+== Behavior & honesty
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `behavior-enforcement-honesty`
+| `rateLimitRps`, `clientAuth: mtls`, `trustedProxySource` XFF — contract, not enforced; CORS emits only for a single origin
+| stable
+| `amispec-compile/exposure`
+|===
+
+These fields are *declared* semantics: the platform marks them
+"DECLARED, NOT ENFORCED" instead of pretending. Do not rely on them for
+protection until enforcement ships.
+
+== CLI surface
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `cli-json-forms`
+| `ami {status,doctor,contracts,versions,network status,storage} --json`
+| experimental
+| `cli.rs`
+|===
+
+Current JSON shapes (experimental — fields may change with a changelog note):
+
+* `ami contracts --json` → `{ "contracts": [ { "id", "title", "value", "stability", "since", "source", ... } ] }`
+* `ami versions --json` → `{ "cli", "k3s", "ciliumChart", "flux", "certManager", "amispecSchema" }`
+* `ami doctor --json` → report including `contract_checks` and `network_drift`
+* `ami network status --json` → `{ "drift", "snapshot_mismatch", "egress_ip", "cloud_provider" }`
+
+== AmiSpec schema
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `amispec-schema`
+| `apiVersion topology.amispec.io/v1`, schema `1.0.0`
+| stable
+| `amispec` (CUE + specification)
+
+| `amispec-provenance-labels`
+| `amispec.io/*`
+| experimental
+| `amispec-compile/provenance.rs`
+|===
+
+== Host paths
+
+[cols="1,3,1,2", options="header"]
+|===
+| ID | Value | Stability | Source
+
+| `paths-runtime`
+| `/var/lib/amiterra/` (runtime), config in `~/.amiterra/config.yaml` or `/etc/amiterra/config.yaml`; sysctl `/etc/sysctl.d/98-amiterra-platform.conf`, `/etc/sysctl.d/99-amiterra-tune.conf`, limits `/etc/security/limits.d/99-amiterra.conf`
+| stable
+| `context.rs`, `tune/mod.rs`
+|===
+
+== Stability policy
+
+[cols="1,2,2", options="header"]
+|===
+| Stability | Guarantee | How it changes
+
+| `stable`
+| Safe to rely on in production
+| Release version + changelog + deprecation window (≥1 minor) + migration note; renames keep the old name alive for the window
+
+| `experimental`
+| Usable, but expect changes
+| Changelog entry; always marked in `ami contracts`
+
+| `internal`
+| Not an interface (debugging aid)
+| May change at any moment
+|===
+
+See also: xref:configuration.adoc[Configuration], xref:safety.adoc[Safety &
+Reversibility], xref:commands.adoc[Command Reference].

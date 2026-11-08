@@ -49,6 +49,12 @@ pub enum Commands {
     /// Network address lifecycle: diff live facts vs applied configs, refresh
     Network(crate::network::cli::NetworkArgs),
 
+    /// Platform contract registry: what you may rely on (works offline)
+    Contracts(ContractsArgs),
+
+    /// Pinned component versions (the same constants the installer uses)
+    Versions(VersionsArgs),
+
     /// Validate or review a topology against the passport catalog (local door)
     Topology(TopologyArgs),
 
@@ -221,6 +227,24 @@ pub struct DoctorArgs {
     /// Storage inventory / tier / Order-Improve plan (alias of `ami storage plan`)
     #[arg(long)]
     pub storage: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ContractsArgs {
+    /// Machine-readable registry (Design Doc 0027 §2)
+    #[arg(long)]
+    pub json: bool,
+
+    /// Filter by section: storage|gitops|cluster|versions|state|behavior|cli|amispec|paths
+    #[arg(long)]
+    pub section: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct VersionsArgs {
+    /// Machine-readable pins (Design Doc 0027 §2)
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]

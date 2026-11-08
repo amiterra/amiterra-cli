@@ -26,6 +26,8 @@ pub struct PreflightReport {
     pub ready_for_dev: bool,
     /// Snapshot vs applied network drift hint (Task 0008).
     pub network_drift: Option<String>,
+    /// Contract <-> cluster state diagnostics (Task 0007).
+    pub contract_checks: Vec<crate::contracts::ContractCheck>,
 }
 
 pub fn run_preflight() -> PreflightReport {
@@ -113,6 +115,7 @@ pub fn run_preflight() -> PreflightReport {
         ready_for_server,
         ready_for_dev,
         network_drift: crate::network::doctor_hint(),
+        contract_checks: crate::contracts::doctor_checks(),
     }
 }
 
@@ -271,6 +274,19 @@ pub fn print_preflight_report(report: &PreflightReport) {
 
     if let Some(hint) = &report.network_drift {
         items.push(("Network Drift", hint.clone()));
+    }
+
+    for c in &report.contract_checks {
+        let mark = match c.status {
+            crate::contracts::CheckStatus::Ok => "ok",
+            crate::contracts::CheckStatus::Warn => "warn",
+            crate::contracts::CheckStatus::Missing => "missing",
+            crate::contracts::CheckStatus::Skipped => "skip",
+        };
+        items.push((
+            "Contract Check",
+            format!("[{mark}] {}: {}", c.contract, c.detail),
+        ));
     }
 
     let item_refs: Vec<(&str, &str)> = items
@@ -437,6 +453,7 @@ mod tests {
             ready_for_server: true,
             ready_for_dev: false,
             network_drift: None,
+            contract_checks: vec![],
         };
 
         // Should render without panic
@@ -464,6 +481,7 @@ mod tests {
             ready_for_server: true,
             ready_for_dev: false,
             network_drift: None,
+            contract_checks: vec![],
         };
 
         // Should render without panic and offer server bootstrap next steps
@@ -491,6 +509,7 @@ mod tests {
             ready_for_server: false,
             ready_for_dev: true,
             network_drift: None,
+            contract_checks: vec![],
         };
 
         print_preflight_report(&report);

@@ -2,6 +2,7 @@ pub mod capabilities;
 pub mod cleanup;
 mod cli;
 mod context;
+pub mod contracts;
 mod daemon;
 pub mod delivery;
 pub mod discovery;
@@ -112,6 +113,12 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Commands::Network(args)) => {
             network::cli::handle_network(args).await?;
+        }
+        Some(Commands::Contracts(args)) => {
+            contracts::print_registry(args.json, args.section.as_deref())?;
+        }
+        Some(Commands::Versions(args)) => {
+            contracts::print_versions(args.json)?;
         }
         Some(Commands::Topology(args)) => {
             delivery::cli::handle_topology(args)?;

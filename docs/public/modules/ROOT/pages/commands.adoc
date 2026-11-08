@@ -235,6 +235,26 @@ what broke and what `refresh` will (and will not) fix. Third-party
 allowlists are always a manual checklist: the platform never touches
 someone else's firewall.
 
+== `ami contracts` / `ami versions`
+
+Platform contract registry (see xref:contracts.adoc[Platform Contracts]) —
+what the platform *guarantees*, discoverable offline.
+
+`ami contracts [--json] [--section <name>]`::
+  Full registry grouped by section (`storage`, `gitops`, `cluster`,
+  `versions`, `state`, `behavior`, `cli`, `amispec`, `paths`), with stability
+  (`stable` / `experimental` / `internal`) and the enforcing source for each
+  value. `--json` is the tooling form.
+
+`ami versions [--json]`::
+  Pinned component versions — the exact constants the installer deploys
+  (k3s, Cilium chart, Flux, cert-manager, AmiSpec schema) plus the CLI
+  version. Plan compatibility against these pins.
+
+`ami doctor` also verifies contract invariants against the live host
+(StorageClass, data root, Cilium `k8sServiceHost`/`advertise-address`,
+PVC classes outside the registry).
+
 == Global conventions
 
 [cols="1,3"]
