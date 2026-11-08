@@ -375,10 +375,14 @@ impl TerminalWizard {
             .or(auto_node_ip)
             .unwrap_or_else(|| report.topology.primary_node_ip().to_string());
 
+        // node-external-ip: only an address the node owns (public NIC) or one
+        // the operator explicitly declared. Behind NAT the probed value is the
+        // gateway's egress IP — useful for firewall allowlists, NOT a node
+        // address — so it is never written here (fail-closed).
         let node_external_ip = args
             .node_external_ip
             .clone()
-            .or_else(|| report.topology.primary_external_ip().map(String::from));
+            .or_else(|| report.topology.node_owned_external_ip().map(String::from));
 
         let wireguard_enabled = report.topology.is_wireguard_required();
 
@@ -397,6 +401,13 @@ impl TerminalWizard {
             if !tls_sans.contains(domain) {
                 tls_sans.push(domain.clone());
             }
+        }
+        // A declared node-external-ip is a valid name for this node — it must
+        // be reachable by it in the API server certificate.
+        if let Some(ext) = &node_external_ip
+            && !tls_sans.contains(ext)
+        {
+            tls_sans.push(ext.clone());
         }
 
         ClusterNodeConfig {
@@ -460,8 +471,8 @@ impl TerminalWizard {
             && ext != report.topology.primary_node_ip()
         {
             items.push((
-                "External Ingress IP",
-                format!("{} (Egress auto-detected)", ext),
+                "Egress IP (auto)",
+                format!("{ext} (for firewall allowlists; not the node address)"),
             ));
         }
 
@@ -927,6 +938,73 @@ mod tests {
         assert_eq!(cfg.node_external_ip, Some("95.217.142.10".to_string()));
         assert!(cfg.wireguard_enabled);
         assert_eq!(cfg.pod_cidr, "10.42.0.0/16");
+    }
+
+    #[test]
+    fn test_private_nat_fails_closed_for_node_external_ip() {
+        // Behind NAT the probed value is the gateway's egress IP — it must
+        // never land in node-external-ip (or SANs) automatically.
+        let report = DiscoveryReport {
+            hostname: "nat-node".to_string(),
+            interfaces: vec![],
+            topology: HostTopology::PrivateNat {
+                private_ip: "10.0.2.15".to_string(),
+                public_nat_ip: Some("198.51.100.1".to_string()),
+                interface: "eth0".to_string(),
+            },
+            public_probed_ip: Some("198.51.100.1".to_string()),
+            pod_cidr: "10.42.0.0/16".to_string(),
+            service_cidr: "10.43.0.0/16".to_string(),
+            cidr_collision_prevented: false,
+            tls_sans: vec!["127.0.0.1".to_string(), "10.0.2.15".to_string()],
+        };
+        let args = InitArgs {
+            yes: true,
+            ..Default::default()
+        };
+        let cfg =
+            TerminalWizard::build_default_config(&report, NodeRole::ControlPlaneInit, &args, None);
+        assert_eq!(
+            cfg.node_external_ip, None,
+            "NAT egress is not a node address"
+        );
+        assert!(
+            !cfg.tls_sans.contains(&"198.51.100.1".to_string()),
+            "gateway egress must not enter API server SANs"
+        );
+    }
+
+    #[test]
+    fn test_declared_external_ip_reaches_config_and_sans() {
+        // Explicit declaration (e.g. 1:1 NAT) is honored — and the address
+        // becomes a valid name for the API server certificate.
+        let report = DiscoveryReport {
+            hostname: "nat-node".to_string(),
+            interfaces: vec![],
+            topology: HostTopology::PrivateNat {
+                private_ip: "10.0.2.15".to_string(),
+                public_nat_ip: Some("198.51.100.1".to_string()),
+                interface: "eth0".to_string(),
+            },
+            public_probed_ip: Some("198.51.100.1".to_string()),
+            pod_cidr: "10.42.0.0/16".to_string(),
+            service_cidr: "10.43.0.0/16".to_string(),
+            cidr_collision_prevented: false,
+            tls_sans: vec!["127.0.0.1".to_string(), "10.0.2.15".to_string()],
+        };
+        let args = InitArgs {
+            yes: true,
+            node_external_ip: Some("198.51.100.1".to_string()),
+            ..Default::default()
+        };
+        let cfg =
+            TerminalWizard::build_default_config(&report, NodeRole::ControlPlaneInit, &args, None);
+        assert_eq!(
+            cfg.node_external_ip,
+            Some("198.51.100.1".to_string()),
+            "explicit --external-ip is honored"
+        );
+        assert!(cfg.tls_sans.contains(&"198.51.100.1".to_string()));
     }
 
     #[test]

@@ -60,6 +60,20 @@ impl HostTopology {
             HostTopology::PrivateNat { public_nat_ip, .. } => public_nat_ip.as_deref(),
         }
     }
+
+    /// External IP the node itself OWNS (an address on its interfaces).
+    ///
+    /// `None` for NAT topologies: `primary_external_ip()` there is the
+    /// gateway's egress address, which the node cannot be claimed to live
+    /// at (fail-closed — a NAT user declares the inbound address via
+    /// `--external-ip` when there really is one, e.g. 1:1 NAT).
+    pub fn node_owned_external_ip(&self) -> Option<&str> {
+        match self {
+            HostTopology::SinglePublicIp { public_ip, .. } => Some(public_ip.as_str()),
+            HostTopology::MultiNic { public_ip, .. } => public_ip.as_deref(),
+            HostTopology::PrivateNat { .. } => None,
+        }
+    }
 }
 
 /// Helper to scan all host network interfaces.
@@ -693,6 +707,35 @@ mod tests {
         assert!(!is_ignored_interface("br0"));
         assert!(!is_ignored_interface("eth0.100"));
         assert!(!is_ignored_interface("ppp0"));
+    }
+
+    #[test]
+    fn test_node_owned_external_ip_only_for_owned_addresses() {
+        // Owned: the address sits on the node's interface.
+        let single = HostTopology::SinglePublicIp {
+            interface: "eth0".to_string(),
+            public_ip: "95.217.142.10".to_string(),
+        };
+        assert_eq!(single.node_owned_external_ip(), Some("95.217.142.10"));
+
+        let multi = HostTopology::MultiNic {
+            public_ip: Some("95.217.142.11".to_string()),
+            public_interface: Some("eth0".to_string()),
+            private_ip: "10.0.0.5".to_string(),
+            private_interface: "eth1".to_string(),
+            storage_interfaces: vec![],
+        };
+        assert_eq!(multi.node_owned_external_ip(), Some("95.217.142.11"));
+
+        // NAT: the probed value is the gateway's egress IP — not ours.
+        let nat = HostTopology::PrivateNat {
+            private_ip: "10.0.2.15".to_string(),
+            public_nat_ip: Some("198.51.100.1".to_string()),
+            interface: "eth0".to_string(),
+        };
+        assert_eq!(nat.node_owned_external_ip(), None);
+        // The egress value stays available for allowlist reporting.
+        assert_eq!(nat.primary_external_ip(), Some("198.51.100.1"));
     }
 
     #[test]

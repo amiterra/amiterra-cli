@@ -43,7 +43,9 @@ impl NetworkDiscovery {
         let topology = classify_topology(&interfaces, public_probed_ip.as_deref());
 
         let node_ip = topology.primary_node_ip();
-        let external_ip = topology.primary_external_ip();
+        // SANs get only node-owned addresses: a NAT gateway's egress IP is
+        // not a valid name for this API server (declared = enforced).
+        let external_ip = topology.node_owned_external_ip();
 
         let tls_sans = generate_tls_sans(&hostname, node_ip, external_ip, &[]);
 
@@ -76,7 +78,7 @@ impl NetworkDiscovery {
                 find_collision_free_cidrs(&occupied_subnets);
             let topology = classify_topology(&interfaces, None);
             let node_ip = topology.primary_node_ip();
-            let external_ip = topology.primary_external_ip();
+            let external_ip = topology.node_owned_external_ip();
             let tls_sans = generate_tls_sans(&hostname, node_ip, external_ip, &[]);
             DiscoveryReport {
                 hostname,
