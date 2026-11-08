@@ -894,8 +894,7 @@ mod tests {
         // production cluster.
         // The effective Day-0 base is what `ami init` renders — the
         // in-code manifest (os/configs is a reference copy).
-        let rendered =
-            crate::providers::server::render_cilium_manifest(false, "127.0.0.1");
+        let rendered = crate::providers::server::render_cilium_manifest(false, "127.0.0.1");
         fn ypath<'a>(v: &'a serde_yaml::Value, path: &str) -> Option<&'a serde_yaml::Value> {
             let mut cur = v;
             for seg in path.trim_start_matches('/').split('/') {
@@ -959,8 +958,7 @@ mod tests {
             ("/operator/image/useDigest", "false"),
             ("/operator/image/digest", ""),
         ] {
-            let v = ypath(&base, path)
-                .unwrap_or_else(|| panic!("Day-0 base must define {path}"));
+            let v = ypath(&base, path).unwrap_or_else(|| panic!("Day-0 base must define {path}"));
             assert_eq!(
                 v,
                 &if what.is_empty() {

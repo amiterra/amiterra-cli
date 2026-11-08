@@ -46,6 +46,9 @@ pub enum Commands {
     /// Bootstrap GitOps (Flux + Git binding), inspect state — opt-in, idempotent
     Gitops(GitopsArgs),
 
+    /// Network address lifecycle: diff live facts vs applied configs, refresh
+    Network(crate::network::cli::NetworkArgs),
+
     /// Validate or review a topology against the passport catalog (local door)
     Topology(TopologyArgs),
 

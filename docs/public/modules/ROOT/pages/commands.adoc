@@ -205,6 +205,36 @@ re-probes the host and only claims "Host state restored" when nothing is
 left. Without `--purge`, data directories are reported as *kept*, not as
 restored. Use `ami tune rollback` first if you only want to undo tuning.
 
+== `ami network`
+
+Network address lifecycle (Design Doc 0031 §7): addresses are re-diffable
+declared facts. The audit snapshot lives at `/var/lib/amiterra/network-state.yaml`;
+the source of truth is the applied configs (k3s config, Cilium
+`k8sServiceHost`, Flux remote).
+
+`ami network status`::
+  Read-only diff of *live* facts (discovery + egress/IMDS probes) against the
+  *applied* configs. Reports each drift with its impact surface (k3s config /
+  cert SANs / Cilium / Flux / join endpoint / external allowlists) and any
+  snapshot-vs-config mismatch (manual edits). `--json` for machine output.
+
+`ami network refresh`::
+  Explicit reconcile — no background magic. Idempotent steps in fixed order
+  (k3s config → restart → cert SANs → Cilium host + rollout → Flux remote +
+  known_hosts → join surface → WireGuard pins → edge trust → allowlists
+  checklist). Fail-closed gates: certificate rotation requires `--renew-certs`,
+  trust re-consent requires `--re-consent-trust` (nothing moves trust
+  implicitly). `-y` runs only the safe steps in non-interactive sessions;
+  `--dry-run` prints the plan. On HA clusters (several control-plane nodes)
+  the command *refuses*: address changes of embedded-etcd members are out of
+  scope. Stable-name migration: `--adopt-stable-names --git-host <dns-or-wg>`
+  re-pins the Flux remote away from raw IPs.
+
+After an IP change, run `ami network status` first — it tells you exactly
+what broke and what `refresh` will (and will not) fix. Third-party
+allowlists are always a manual checklist: the platform never touches
+someone else's firewall.
+
 == Global conventions
 
 [cols="1,3"]

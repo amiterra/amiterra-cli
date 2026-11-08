@@ -353,7 +353,7 @@ impl EnvironmentBackend for LinuxServerBackend {
             preview_items.push(("Target Node Role", role_title));
             preview_items.push(("Cluster Node IP", &node_config.node_ip));
             if let Some(ext) = &node_config.node_external_ip {
-                preview_items.push(("External Ingress IP", ext));
+                preview_items.push(("Node external IP", ext));
             }
             let wg_status = if node_config.wireguard_enabled {
                 "● Required (Transparent eBPF WAN mesh)"
@@ -1198,6 +1198,9 @@ fn write_tailored_k3s_config(config: &ClusterNodeConfig) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(config_path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to chmod {}", config_path.display()))?;
+    // Audit snapshot of the applied network facts (Task 0008); best-effort —
+    // never blocks init/join.
+    let _ = crate::network::capture_snapshot();
     Ok(())
 }
 

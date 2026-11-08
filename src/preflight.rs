@@ -24,6 +24,8 @@ pub struct PreflightReport {
     pub k3s_version: Option<String>,
     pub ready_for_server: bool,
     pub ready_for_dev: bool,
+    /// Snapshot vs applied network drift hint (Task 0008).
+    pub network_drift: Option<String>,
 }
 
 pub fn run_preflight() -> PreflightReport {
@@ -110,6 +112,7 @@ pub fn run_preflight() -> PreflightReport {
         k3s_version,
         ready_for_server,
         ready_for_dev,
+        network_drift: crate::network::doctor_hint(),
     }
 }
 
@@ -264,6 +267,10 @@ pub fn print_preflight_report(report: &PreflightReport) {
             "○ not ready".to_string()
         };
         items.push(("Server Profile", server_status));
+    }
+
+    if let Some(hint) = &report.network_drift {
+        items.push(("Network Drift", hint.clone()));
     }
 
     let item_refs: Vec<(&str, &str)> = items
@@ -429,6 +436,7 @@ mod tests {
             k3s_version: Some("v1.37.1+k3s1".to_string()),
             ready_for_server: true,
             ready_for_dev: false,
+            network_drift: None,
         };
 
         // Should render without panic
@@ -455,6 +463,7 @@ mod tests {
             k3s_version: None,
             ready_for_server: true,
             ready_for_dev: false,
+            network_drift: None,
         };
 
         // Should render without panic and offer server bootstrap next steps
@@ -481,6 +490,7 @@ mod tests {
             k3s_version: None,
             ready_for_server: false,
             ready_for_dev: true,
+            network_drift: None,
         };
 
         print_preflight_report(&report);

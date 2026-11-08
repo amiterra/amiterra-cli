@@ -10,6 +10,7 @@ pub mod gitops;
 pub mod guardrails;
 mod installer;
 pub mod join_command;
+pub mod network;
 mod preflight;
 mod providers;
 pub mod storage;
@@ -108,6 +109,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Commands::Gitops(args)) => {
             gitops::cli::handle_gitops(args)?;
+        }
+        Some(Commands::Network(args)) => {
+            network::cli::handle_network(args).await?;
         }
         Some(Commands::Topology(args)) => {
             delivery::cli::handle_topology(args)?;
